@@ -301,6 +301,27 @@ void fiber_p1(cfg::HomoConfig config) {
 		if (iso > 1) binarized_iso(Cb, volb); else binarized_vox(Cb, volb);
 	};
 
+	if (mode == "evalfield") {
+		// P3 reference: random physical density field (no symmetrization), saved as p3_rho_seedXXX,
+		// full 6x6 C^H written to p3_C_seedXXX.txt. Stiffness is (1e-9 + rho) * C0, as in homo3d.
+		const double contrast = std::stod(env("P3_CONTRAST", "3"));
+		for (int seed : seeds) {
+			random_field(nx, ny, nz, seed, period, h);
+			for (size_t i = 0; i < N; i++) h[i] = float(std::max(lo, sigm(contrast * h[i])));
+			rho.value().fromHost(h);
+			char name[64];
+			sprintf(name, "p3_rho_seed%03d", seed); rho.value().toVdb(getPath(name));
+			auto Ch = genCH(hom, rho.pow(1.f));
+			Ch.holdOff();
+			auto e = Ch(0, 0);
+			e.eval();
+			sprintf(name, "p3_C_seed%03d.txt", seed); Ch.writeToTxt(getPath(name));
+			printf("[evalfield] seed %d  C11 %.6f C22 %.6f C33 %.6f C44 %.6f C55 %.6f C66 %.6f\n", seed,
+				Ch.data()[0], Ch.data()[7], Ch.data()[14], Ch.data()[21], Ch.data()[28], Ch.data()[35]);
+		}
+		return;
+	}
+
 	if (mode == "evaliso") {
 		// Re-check saved designs: binary cell from the filtered field upsampled by P1_ISO, re-solved.
 		// P1_FROM is the run dir holding p1_seedXXX_rho. Writes p1_evaliso.csv.
