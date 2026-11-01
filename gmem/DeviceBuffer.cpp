@@ -55,6 +55,8 @@ namespace homo {
 				}
 				break;
 			}
+			// At process exit the CUDA runtime may already be gone; the driver frees everything anyway.
+			if (err == cudaErrorCudartUnloading) err = cudaSuccess;
 			if (err) {
 				printf("\033[31mFree buffer failed with err %s, memType %s\033[0m\n", cudaGetErrorName(err), getMemType(mType).c_str());
 				throw std::runtime_error("failed to Free memory");

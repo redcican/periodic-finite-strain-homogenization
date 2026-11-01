@@ -1,4 +1,5 @@
 #pragma once
+#include "../gmem/mem_policy.h"
 #include "AutoDiff.h"
 #include <array>
 #include <iterator>
@@ -54,7 +55,8 @@ namespace homo {
 			ptr.pitch = (dim_.width + 511) / 512 * 512;
 			ptr.xsize = dim_.width / sizeof(T);
 			ptr.ysize = dim_.depth * dim_.height;
-			auto err = cudaMallocManaged(&ptr.ptr, ptr.pitch * ptr.ysize );
+			auto err = homo::useManagedForLargeBuffers() ? cudaMallocManaged(&ptr.ptr, ptr.pitch * ptr.ysize)
+			                                             : cudaMalloc(&ptr.ptr, ptr.pitch * ptr.ysize);
 #endif
 			if (err) {
 				CheckErr(err);
@@ -572,7 +574,7 @@ template<typename Arg> constexpr bool is_##TypeName##_v = is_##TypeName<Arg>::va
 			typename SubExp = subExp_t,
 			std::enable_if_t<is_unarymap_tsexp_v<SubExp>, int> = 0>
 		__host_device_func auto operator*(Scalar a) {
-			linear_umker_t<T, eye_umker_t<T>> linker(eye_umker_t<T>(), a, 1);
+			linear_umker_t<T, eye_umker_t<T>> linker(eye_umker_t<T>(), a, 0); // a * x (upstream had b = 1)
 			auto& subexp = *static_cast<SubExp*>(this);
 			return  subexp.composite(linker);
 		}
@@ -582,7 +584,7 @@ template<typename Arg> constexpr bool is_##TypeName##_v = is_##TypeName<Arg>::va
 			std::enable_if_t<!is_unarymap_tsexp_v<SubExp>, int> = 0>
 		__host_device_func auto operator*(Scalar a) {
 			using Kernel = linear_umker_t<T, eye_umker_t<T>>;
-			Kernel linker(eye_umker_t<T>(), a, 1);
+			Kernel linker(eye_umker_t<T>(), a, 0); // a * x (upstream had b = 1)
 			auto& subexp = *static_cast<SubExp*>(this);
 			return unarymap_tsexp_t<T, Kernel, SubExp>(subexp, linker);
 		}

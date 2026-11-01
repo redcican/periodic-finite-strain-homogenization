@@ -1,3 +1,4 @@
+#include "../gmem/mem_policy.h"
 #define _USE_MATH_DEFINES
 #include "grid.h"
 #include <stdexcept>
@@ -231,7 +232,7 @@ size_t Grid::allocateBuffer(int nv, int ne)
 	if (gridConfig.enableManagedMem) {
 		for (int i = 0; i < 6; i++) {
 			for (int j = 0; j < 3; j++) {
-				uchar_h[i][j] = getMem().addBuffer(homoutils::formated("%s_uchost_%d_%d", getName().c_str(), i, j), nv * sizeof(VT), Managed)->data<VT>();
+				uchar_h[i][j] = getMem().addBuffer(homoutils::formated("%s_uchost_%d_%d", getName().c_str(), i, j), nv * sizeof(VT), useManagedForLargeBuffers() ? Managed : Device)->data<VT>();
 			}
 			v3_reset(uchar_h[i], nv);
 		}
@@ -628,14 +629,14 @@ void homo::Grid::readDisplacement(const std::string& fname)
 void homo::Grid::v3_upload(VT* dev[3], VT* hst[3])
 {
 	for (int i = 0; i < 3; i++) {
-		cudaMemcpy(dev[i], hst[i], sizeof(VT) * n_gsvertices(), cudaMemcpyHostToDevice);
+		cudaMemcpy(dev[i], hst[i], sizeof(VT) * n_gsvertices(), cudaMemcpyDefault);
 	}
 }
 
 void homo::Grid::v3_download(VT* hst[3], VT* dev[3])
 {
 	for (int i = 0; i < 3; i++) {
-		cudaMemcpy(hst[i], dev[i], sizeof(VT) * n_gsvertices(), cudaMemcpyDeviceToHost);
+		cudaMemcpy(hst[i], dev[i], sizeof(VT) * n_gsvertices(), cudaMemcpyDefault);
 	}
 }
 

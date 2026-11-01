@@ -358,10 +358,14 @@ void example_yours(cfg::HomoConfig config) {
 	// add your routines here ...
 }
 
+#include "fiber_p1.cuh"
+
 void runCustom(cfg::HomoConfig config) {
 	//example_opti_bulk(config);
 	//example_opti_npr(config);
 	//example_opti_shear_isotropy(config);
+	const char* which = getenv("HOMO_CUSTOM");
+	if (which && std::string(which) == "p1") { fiber_p1(config); return; }
 	example_yours(config);
 }
 
