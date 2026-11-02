@@ -322,6 +322,21 @@ void fiber_p1(cfg::HomoConfig config) {
 		return;
 	}
 
+	if (mode == "evalvdb") {
+		// Re-solve C^H on a saved density VDB (P1_FROM = file path), stiffness (1e-9 + rho^P1_POW) * C0.
+		// Writes <prefix>evalvdb_C.txt (6x6).
+		const std::string from = env("P1_FROM", "");
+		const float pw = std::stof(env("P1_POW", "3"));
+		rho.value().fromVdb(from, false);
+		auto Ch = genCH(hom, rho.pow(pw));
+		Ch.holdOff();
+		auto e = Ch(0, 0);
+		e.eval();
+		Ch.writeToTxt(getPath("evalvdb_C.txt"));
+		printf("[evalvdb] %s  C11 %.6f C12 %.6f C44 %.6f\n", from.c_str(), Ch.data()[0], Ch.data()[1], Ch.data()[21]);
+		return;
+	}
+
 	if (mode == "evaliso") {
 		// Re-check saved designs: binary cell from the filtered field upsampled by P1_ISO, re-solved.
 		// P1_FROM is the run dir holding p1_seedXXX_rho. Writes p1_evaliso.csv.
