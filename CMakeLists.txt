@@ -146,3 +146,8 @@ target_link_libraries(homo3d PRIVATE ${CUDA_cusolver_LIBRARY})
 target_link_libraries(homo3d PRIVATE ${CUDA_cusparse_LIBRARY})
 target_link_libraries(homo3d PRIVATE ${CUDA_CUBLAS_LIBRARIES})
 target_link_libraries(homo3d PRIVATE ${GFLAGS_LIBRARIES})
+
+# vdb2npy: convert an OpenVDB density field to a dense .npy array (used by the reference solver scripts)
+add_executable(vdb2npy tools/vdb2npy.cpp)
+target_include_directories(vdb2npy PRIVATE ${openvdb_SOURCE_DIR}/openvdb)
+target_link_libraries(vdb2npy PRIVATE openvdb_shared)

@@ -1,0 +1,9 @@
+name: fs-viz
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pyvista
+  - scikit-image
+  - matplotlib

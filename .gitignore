@@ -1,3 +1,10 @@
 build
 .vscode
 *.sh
+!tools/show.sh
+__pycache__/
+*.pyc
+*.npy
+*.npz
+references/
+results/

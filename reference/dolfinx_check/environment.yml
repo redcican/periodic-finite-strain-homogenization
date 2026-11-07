@@ -1,0 +1,9 @@
+name: fs-dolfinx
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - fenics-dolfinx=0.11
+  - dolfinx_mpc=0.11
+  - petsc=*=real*
+  - mpich
