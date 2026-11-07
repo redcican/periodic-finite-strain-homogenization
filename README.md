@@ -3,6 +3,7 @@
 This repository contains the code for the homogenization and design of periodic cells on voxel grids at small and finite strain:
 
 * a GPU solver for inverse homogenization of periodic cells (CUDA C++), extended from the open-source solver of Zhang et al. (2023);
+* a GPU solver for periodic finite-strain homogenization (CUDA C++, `fs3d`): a matrix-free mixed-precision Newton-Krylov multigrid method with stability criteria;
 * a double-precision reference solver for periodic finite-strain homogenization (JAX), with uniaxial-stress paths, the Poisson's ratio along a load path, stability criteria and a Bloch-wave analysis;
 * an independent finite element implementation in DOLFINx for cross-checking the reference solver;
 * tools for converting and rendering density fields.
@@ -13,6 +14,7 @@ This repository contains the code for the homogenization and design of periodic 
 |------|---------|
 | `*.cu`, `*.cpp`, `AutoDiff/`, `culib/`, `gmem/`, `homogenization/`, `optimization/`, `voxelIO/` | GPU solver |
 | `fiber_p1.cuh` | custom driver of the GPU solver: projection onto a stiffness target and re-evaluation of $C^H$ |
+| `finite_strain/` | finite-strain GPU solver `fs3d` |
 | `reference/jax/` | FP64 finite-strain reference solver and its scripts |
 | `reference/dolfinx_check/` | DOLFINx cross-check of the reference solver |
 | `tools/` | `vdb2npy` (OpenVDB to `.npy`), PyVista and matplotlib renders |
@@ -67,7 +69,7 @@ cmake .. -DCMAKE_CUDA_HOST_COMPILER=$CXX -DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin
 make -j4
 ```
 
-If the conda environment is activated, `cmake` will automatically checkout the dependencies in this environment. The build produces `build/homo3d` (the GPU solver) and `build/vdb2npy` (the converter used by the Python scripts; set `VDB2NPY=<path>` to use another one).
+If the conda environment is activated, `cmake` will automatically checkout the dependencies in this environment. The build produces `build/homo3d` (the GPU solver), `build/fs3d` (the finite-strain GPU solver) and `build/vdb2npy` (the converter used by the Python scripts; set `VDB2NPY=<path>` to use another one).
 
 
 
@@ -105,6 +107,33 @@ HOMO_CUSTOM=p1 P1_MODE=evalvdb P1_FROM=out/rho ./build/homo3d -obj custom -reso 
 # random density fields and their C^H, used by reference/jax/validate_linear.py
 HOMO_CUSTOM=p1 P1_MODE=evalfield ./build/homo3d -obj custom -reso 16 -relthres 1e-4 -prefix check16/
 ```
+
+#### Finite-strain GPU solver
+
+`fs3d` follows a load path of a cell with the energy of a compressible neo-Hookean solid and the void interpolation of Wang et al. (2014), $s=\rho_{\min}+\bar\rho^{3}$. The density is the physical density $\bar\rho\in[0,1]$, read from an OpenVDB file (e.g. the `rho` output of `homo3d`, with `-reso`) or a `.npy` array of shape $[n,n,n]$; $n$ must be $8\cdot2^L$ (16, 32, 64, 128, 256).
+
+* Newton iterations with the Eisenstat-Walker forcing terms, a backtracking line search on the cell energy (with a residual merit function beyond an instability), mixed macroscopic control through a bordered Hessian;
+* PCG preconditioned by a multigrid V-cycle; MINRES with a shifted preconditioner once the tangent is indefinite;
+* matrix-free FP32 fine level from a deformation-gradient cache, Galerkin coarse operators stored in FP16 in the symmetric scaling $Z^{-1/2}KZ^{-1/2}$, FP64 dense solve on the $8^3$ grid;
+* step control: a failed step is repeated with FP32 coarse stencils, then divided into substeps (at most three divisions); `-prec adaptive` switches to FP32 stencils once the extrapolated smallest eigenvalue falls below 10 % of its initial value;
+* stability criteria: smallest eigenvalue of the scaled tangent of the cell (LOBPCG), of a $2\times2\times2$ supercell, and rank-one ellipticity of the effective tangent.
+
+Options of the path mode:
+
+* `-in`, `-reso`: density field and resolution.
+* `-path`: `L1` uniaxial tension, `L2` uniaxial compression (both with free lateral stretches $\bar F_{22}$, $\bar F_{33}$), `L3` simple shear, `L4` volumetric expansion. Default `L1`.
+* `-steps`, `-inc`: number of load steps and increment (default 10 steps of 0.02, 0.01 for `L4`).
+* `-prec`: coarse stencil precision `fp16`, `fp32` or `adaptive` (default).
+* `-crit`: stability criteria to evaluate, any of `1` (cell), `2` (supercell), `3` (rank-one); `-crit_every` evaluates criterion 1 every k-th load point. Default `1`.
+* `-E`, `-nu`: base material, default 10 and 0.3.
+* `-newton_tol`: relative Newton tolerance, default `1e-6`.
+* `-prefix`: output path suffixed with `/`; `-verbose 2` prints every Newton iteration.
+
+```shell
+./build/fs3d -mode path -in out/rho -reso 128 -path L2 -crit 123 -prefix out/
+```
+
+The load points are written to `<prefix>/path_<L>.csv`: $\bar F$, $\bar P$, the secant Poisson's ratios, Newton and Krylov iterations, substeps, coarse precision and the three stability measures.
 
 #### Finite-strain reference solver
 
