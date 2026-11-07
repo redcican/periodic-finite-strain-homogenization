@@ -122,6 +122,20 @@ private:
 	double Ds[81];                 // Cholesky factor of the border block D + sigma Z0F
 	bool precReady = false;
 	float sigmaNow = 0.f;
+
+public:
+	bool preconditionerReady() const { return precReady && sigmaNow == 0.f; }
+};
+
+// Fluctuation block K_T alone (all components of Fbar prescribed), with the V-cycle as preconditioner.
+struct KOp : LinOp {
+	Solver& S;
+	explicit KOp(Solver& s) : S(s) {}
+	void apply(const BVec& x, BVec& y) override { cell_product(S.cell, x.w, nullptr, y.w, nullptr); }
+	bool prec(const BVec& r, BVec& z) override {
+		S.mg.vcycle(r.w, z.w);
+		return true;
+	}
 };
 
 // ---------------------------------------------------------------------------------------------

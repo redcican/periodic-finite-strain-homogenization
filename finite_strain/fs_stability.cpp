@@ -38,16 +38,6 @@ bool rayleigh_ritz(const Eigen::MatrixXd& GA, const Eigen::MatrixXd& GB, int k, 
 	return true;
 }
 
-struct KOp : LinOp {
-	Solver& S;
-	explicit KOp(Solver& s) : S(s) {}
-	void apply(const BVec& x, BVec& y) override { cell_product(S.cell, x.w, nullptr, y.w, nullptr); }
-	bool prec(const BVec& r, BVec& z) override {
-		S.mg.vcycle(r.w, z.w);
-		return true;
-	}
-};
-
 double qmin(const double A[81], const double nv[3]) {
 	Eigen::Matrix3d Q;
 	for (int i = 0; i < 3; i++)

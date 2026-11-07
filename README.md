@@ -135,6 +135,18 @@ Options of the path mode:
 
 The load points are written to `<prefix>/path_<L>.csv`: $\bar F$, $\bar P$, the secant Poisson's ratios, Newton and Krylov iterations, substeps, coarse precision and the three stability measures.
 
+Small-strain moduli and third-order elastic constants (`-mode toec`): six corrector solves at $\bar F=I$ give $C^H$ and, by the $2n+1$ rule, the 56 constants $T_{IJK}$ of $\bar W=\tfrac12 C^H[\bar E,\bar E]+\tfrac16 T[\bar E,\bar E,\bar E]$ (Voigt order 11, 22, 33, 23, 13, 12 with engineering shears), written to `<prefix>/moduli.txt`:
+
+```shell
+./build/fs3d -mode toec -in out/rho -reso 128 -prefix out/
+```
+
+Adjoint sensitivities (`-mode fdcheck`): the gradient of $\nu_{12}$ (`-obj nu12`) or $\bar P_{11}$ (`-obj P11`) at load point `-fd_k` of a path with respect to the voxel densities, from one bordered adjoint solve, against central differences on `-fd_n` voxels with step `-fd_h`:
+
+```shell
+./build/fs3d -mode fdcheck -in rho32.npy -path L1 -steps 5 -obj nu12 -prec fp32 -fd_n 6
+```
+
 #### Finite-strain reference solver
 
 `reference/jax/finite_strain.py` minimizes the cell energy of a neo-Hookean (or linear) solid on an $n^3$ periodic grid of trilinear hexahedra with $2\times2\times2$ Gauss points, in FP64, by Newton-CG with a backtracking line search. `Cell` prescribes the full macroscopic deformation gradient, `Mixed` prescribes some components and leaves the others free (e.g. uniaxial stress), and `C_linear` returns the small-strain $C^H$. Void elements use the energy interpolation of Wang et al. (2014) with `wls=(500, 0.01)`.
