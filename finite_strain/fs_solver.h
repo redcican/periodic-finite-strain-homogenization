@@ -186,5 +186,6 @@ struct PathResult {
 class Stability;  // supercell and rank-one criteria (fs_stability.h)
 
 PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability* stab);
+void write_path_csv(const std::string& file, const PathResult& r);
 
 }  // namespace fs

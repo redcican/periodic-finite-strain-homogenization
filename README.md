@@ -147,6 +147,19 @@ Adjoint sensitivities (`-mode fdcheck`): the gradient of $\nu_{12}$ (`-obj nu12`
 ./build/fs3d -mode fdcheck -in rho32.npy -path L1 -steps 5 -obj nu12 -prec fp32 -fd_n 6
 ```
 
+Finite-strain design (`-mode design`): the design variables live on one forty-eighth of the cell and are mapped to the full cell by the reflections of the cube, filtered with a periodic hat filter of radius $n/32$ voxels (`-filter_r`) and projected with a Heaviside function whose sharpness doubles every 40 iterations up to 32. Each iteration evaluates $C^H$ from the six correctors, path `L1` with the load steps as load points (criterion 1 every second step) and one adjoint per load point, and updates the design by MMA; a design whose load path fails is rejected and the step repeated with half the move limit.
+
+* `-prog nu`: bound formulation $\min z$ subject to $(\nu_{12}(\varepsilon_k)-\nu^*(\varepsilon_k))^2\le z$, with $\nu^*(\varepsilon)$ = `-nustar` + `-nuslope` $\varepsilon$.
+* `-prog stiff`: least-squares fit of $\bar P_{11}$ to $E^*(\varepsilon+(S-1)\varepsilon^2/(2\varepsilon_{\max}))$ with the stiffening ratio `-S`.
+* constraints $V\le V^*$ and $E^H\ge E^*$; $V^*$ and $E^*$ come from `-ref` (resampled to `-reso`, `-ref_reso` for OpenVDB input), from the initial design `-in`, or from `-Vstar` and `-Estar`.
+* `-iters`, `-move`, `-save_every`: iterations (default 240), MMA move limit (0.1), output interval.
+
+```shell
+./build/fs3d -mode design -prog nu -nustar -0.3 -in out/rho -reso 128 -prefix design/
+```
+
+The run writes `<prefix>/design.csv` (objective, largest deviation, $V/V^*$, $E^H/E^*$ per iteration), the densities `<prefix>/rho_<iter>.vdb` and `<prefix>/rho_design.vdb`, and, for the design thresholded at 0.5, `<prefix>/rho_thresholded.vdb` with its path `L1` in increments of 0.005 and all three stability criteria (`<prefix>/final_L1.csv`).
+
 #### Finite-strain reference solver
 
 `reference/jax/finite_strain.py` minimizes the cell energy of a neo-Hookean (or linear) solid on an $n^3$ periodic grid of trilinear hexahedra with $2\times2\times2$ Gauss points, in FP64, by Newton-CG with a backtracking line search. `Cell` prescribes the full macroscopic deformation gradient, `Mixed` prescribes some components and leaves the others free (e.g. uniaxial stress), and `C_linear` returns the small-strain $C^H$. Void elements use the energy interpolation of Wang et al. (2014) with `wls=(500, 0.01)`.

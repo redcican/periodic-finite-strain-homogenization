@@ -2,6 +2,7 @@
 
 #include "voxelIO/openvdb_wrapper_t.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -88,6 +89,37 @@ std::vector<float> read_density(const std::string& path, int& n) {
 	}
 	if (outside) std::fprintf(stderr, "warning: %zu voxels of %s lie outside the %d^3 grid\n", outside, path.c_str(), n);
 	return rho;
+}
+
+std::vector<float> resample_periodic(const std::vector<float>& src, int ns, int nt) {
+	if (ns == nt) return src;
+	std::vector<float> out(size_t(nt) * nt * nt);
+	auto at = [&](int i, int j, int k) {
+		i = ((i % ns) + ns) % ns;
+		j = ((j % ns) + ns) % ns;
+		k = ((k % ns) + ns) % ns;
+		return src[i + size_t(ns) * (j + size_t(ns) * k)];
+	};
+	for (int k = 0; k < nt; k++)
+		for (int j = 0; j < nt; j++)
+			for (int i = 0; i < nt; i++) {
+				double u[3] = {(i + 0.5) * ns / nt - 0.5, (j + 0.5) * ns / nt - 0.5, (k + 0.5) * ns / nt - 0.5};
+				int b[3];
+				double w[3];
+				for (int d = 0; d < 3; d++) {
+					b[d] = int(std::floor(u[d]));
+					w[d] = u[d] - b[d];
+				}
+				double v = 0;
+				for (int c = 0; c < 8; c++) {
+					int o[3] = {c & 1, (c >> 1) & 1, c >> 2};
+					double wt = 1;
+					for (int d = 0; d < 3; d++) wt *= o[d] ? w[d] : 1 - w[d];
+					v += wt * at(b[0] + o[0], b[1] + o[1], b[2] + o[2]);
+				}
+				out[i + size_t(nt) * (j + size_t(nt) * k)] = float(v);
+			}
+	return out;
 }
 
 void write_density_vdb(const std::string& path, int n, const std::vector<float>& rho) {

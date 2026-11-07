@@ -105,6 +105,9 @@ void vproject_mean(float* v, size_t nodes);
 void vproject_weighted(float* v, const float* sq, size_t nodes);
 void dzero(double* y, size_t m);
 void dscale(double a, double* y, size_t m);
+void dfill(double v, double* y, size_t m);
+void dmul(const double* a, const double* x, double* y, size_t m);  // y = a .* x
+void host2d(const double* h, double* d, size_t m);
 void d2host(const double* d, double* h, size_t m);
 void f2host(const float* d, float* h, size_t m);
 void host2f(const float* h, float* d, size_t m);

@@ -91,6 +91,16 @@ __global__ void k_dscale(double a, double* y, size_t m) {
 	if (i < m) y[i] *= a;
 }
 
+__global__ void k_dfill(double v, double* y, size_t m) {
+	size_t i = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
+	if (i < m) y[i] = v;
+}
+
+__global__ void k_dmul(const double* a, const double* x, double* y, size_t m) {
+	size_t i = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
+	if (i < m) y[i] = a[i] * x[i];
+}
+
 __global__ void k_filter(int n, int R, float r, double wsum, const double* in, double* out) {
 	size_t N = size_t(n) * n * n;
 	size_t e = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
@@ -223,6 +233,18 @@ void dscale(double a, double* y, size_t m) {
 	k_dscale<<<nblocks(m, 256), 256>>>(a, y, m);
 	FS_KERNEL_CHECK();
 }
+
+void dfill(double v, double* y, size_t m) {
+	k_dfill<<<nblocks(m, 256), 256>>>(v, y, m);
+	FS_KERNEL_CHECK();
+}
+
+void dmul(const double* a, const double* x, double* y, size_t m) {
+	k_dmul<<<nblocks(m, 256), 256>>>(a, x, y, m);
+	FS_KERNEL_CHECK();
+}
+
+void host2d(const double* h, double* d, size_t m) { FS_CUDA(cudaMemcpy(d, h, m * sizeof(double), cudaMemcpyHostToDevice)); }
 
 void d2host(const double* d, double* h, size_t m) { FS_CUDA(cudaMemcpy(h, d, m * sizeof(double), cudaMemcpyDeviceToHost)); }
 void f2host(const float* d, float* h, size_t m) { FS_CUDA(cudaMemcpy(h, d, m * sizeof(float), cudaMemcpyDeviceToHost)); }

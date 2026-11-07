@@ -1,4 +1,5 @@
 // fs3d: finite-strain periodic homogenization of voxel cells on the GPU.
+#include "fs_design.h"
 #include "fs_io.h"
 #include "fs_stability.h"
 
@@ -12,7 +13,7 @@
 #include <stdexcept>
 #include <string>
 
-DEFINE_string(mode, "path", "path: one load path with stability criteria; toec: small-strain moduli and third-order constants; fdcheck: adjoint gradient against central differences");
+DEFINE_string(mode, "path", "path: one load path with stability criteria; toec: small-strain moduli and third-order constants; fdcheck: adjoint gradient against central differences; design: finite-strain design by MMA");
 DEFINE_string(in, "", "density field (OpenVDB file of the GPU solver, or .npy of shape [n, n, n])");
 DEFINE_int32(reso, 0, "resolution n (required for OpenVDB input; n = 16, 32, 64, 128, 256)");
 DEFINE_string(prefix, "./", "output directory, suffixed with /");
@@ -33,6 +34,19 @@ DEFINE_string(obj, "nu12", "fdcheck objective at load point -fd_k: nu12 (secant 
 DEFINE_int32(fd_k, 0, "fdcheck load point (default: the last one)");
 DEFINE_int32(fd_n, 6, "fdcheck: number of voxels to perturb");
 DEFINE_double(fd_h, 1e-3, "fdcheck: density perturbation");
+DEFINE_string(prog, "nu", "design program: nu (Poisson's ratio nu* = nustar + nuslope eps) or stiff (stiffening ratio -S)");
+DEFINE_double(nustar, 0.0, "design: prescribed Poisson's ratio at eps = 0");
+DEFINE_double(nuslope, 0.0, "design: slope of the prescribed Poisson's ratio");
+DEFINE_double(S, 2.0, "design: stiffening ratio E_t(eps_max) / E_t(0)");
+DEFINE_string(ref, "", "design: reference cell for V* and E* (default: the initial design -in)");
+DEFINE_int32(ref_reso, 0, "design: resolution of an OpenVDB reference cell (resampled to -reso)");
+DEFINE_double(Vstar, 0.0, "design: volume bound (overrides -ref)");
+DEFINE_double(Estar, 0.0, "design: Young's modulus bound (overrides -ref)");
+DEFINE_int32(iters, 240, "design iterations");
+DEFINE_double(move, 0.1, "MMA move limit");
+DEFINE_double(filter_r, 0.0, "filter radius in voxels (default n / 32)");
+DEFINE_int32(save_every, 20, "design: write the density every k iterations");
+DEFINE_bool(final_check, true, "design: evaluate the thresholded design along L1 with increments 0.005 and all criteria");
 
 namespace {
 
@@ -54,20 +68,6 @@ std::vector<float> load_density(int& n) {
 	return fs::read_density(FLAGS_in, n);
 }
 
-void write_path_csv(const std::string& file, const fs::PathResult& r) {
-	std::ofstream o(file);
-	o << "k,t,eps,F11,F22,F33,F12,P11,P12,P13,P21,P22,P23,P31,P32,P33,nu12,nu13,newton,krylov,substeps,failures,minres,"
-		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted\n";
-	o.precision(10);
-	for (const auto& p : r.pts) {
-		o << p.k << "," << p.t << "," << p.eps << "," << p.F[0] << "," << p.F[4] << "," << p.F[8] << "," << p.F[1];
-		for (int c = 0; c < 9; c++) o << "," << p.P[c];
-		o << "," << p.nu12 << "," << p.nu13 << "," << p.newton << "," << p.krylov << "," << p.substeps << "," << p.failures << ","
-		  << (p.minres ? 1 : 0) << "," << fs::prec_name(p.prec) << "," << p.lam1 << "," << p.lam2 << "," << p.ell << ","
-		  << p.voidDistortedFrac << "\n";
-	}
-}
-
 int run_path_mode() {
 	int n = 0;
 	std::vector<float> rho = load_density(n);
@@ -83,7 +83,7 @@ int run_path_mode() {
 	std::printf("path %s on %d^3 voxels, %d steps, %s stencils\n", path.name.c_str(), n, path.nsteps, FLAGS_prec.c_str());
 	fs::PathResult r = fs::run_path(S, path, po, &stab);
 	std::string file = FLAGS_prefix + "path_" + path.name + ".csv";
-	write_path_csv(file, r);
+	fs::write_path_csv(file, r);
 	std::printf("%s: %zu load points, %d Newton and %d Krylov iterations -> %s\n",
 		r.completed ? "completed" : (r.stopped ? "stopped" : "failed"), r.pts.size(), r.newton, r.krylov, file.c_str());
 	return r.failed ? 2 : 0;
@@ -188,6 +188,44 @@ int run_fdcheck_mode() {
 	return 0;
 }
 
+int run_design_mode() {
+	int n = 0;
+	std::vector<float> x0 = load_density(n);
+	fs::Solver S(n, x0, solver_options());
+	fs::DesignOptions o;
+	o.program = FLAGS_prog;
+	o.nuStar = FLAGS_nustar;
+	o.nuSlope = FLAGS_nuslope;
+	o.S = FLAGS_S;
+	o.iters = FLAGS_iters;
+	o.move = FLAGS_move;
+	o.filterR = FLAGS_filter_r;
+	o.steps = FLAGS_steps;
+	o.inc = FLAGS_inc > 0 ? FLAGS_inc : 0.02;
+	o.prec = FLAGS_prec;
+	o.linTol = FLAGS_lin_tol;
+	o.saveEvery = FLAGS_save_every;
+	o.prefix = FLAGS_prefix;
+	o.finalCheck = FLAGS_final_check;
+	Prec p = FLAGS_prec == "fp32" ? Prec::FP32 : Prec::FP16;
+	double V = FLAGS_Vstar, E = FLAGS_Estar;
+	if (!(V > 0) || !(E > 0)) {
+		std::vector<float> ref = x0;
+		if (!FLAGS_ref.empty()) {
+			int nr = FLAGS_ref_reso;
+			ref = fs::resample_periodic(fs::read_density(FLAGS_ref, nr), nr, n);
+		}
+		double Vr, Er;
+		if (!fs::reference_values(S, ref, p, FLAGS_lin_tol, Vr, Er)) throw std::runtime_error("small-strain moduli of the reference cell failed");
+		if (!(V > 0)) V = Vr;
+		if (!(E > 0)) E = Er;
+	}
+	o.Vstar = V;
+	o.Estar = E;
+	std::printf("design %s on %d^3 voxels: V* = %.5f  E* = %.6e\n", o.program.c_str(), n, V, E);
+	return fs::run_design(S, x0, o);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -197,6 +235,7 @@ int main(int argc, char** argv) {
 		if (FLAGS_mode == "path") return run_path_mode();
 		if (FLAGS_mode == "toec") return run_toec_mode();
 		if (FLAGS_mode == "fdcheck") return run_fdcheck_mode();
+		if (FLAGS_mode == "design") return run_design_mode();
 		std::fprintf(stderr, "unknown mode %s\n", FLAGS_mode.c_str());
 		return 1;
 	} catch (const std::exception& e) {

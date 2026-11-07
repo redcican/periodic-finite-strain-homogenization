@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 
 namespace fs {
 
@@ -118,6 +119,20 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 	s.sp.release(backup);
 	res.completed = !res.stopped && !res.failed;
 	return res;
+}
+
+void write_path_csv(const std::string& file, const PathResult& r) {
+	std::ofstream o(file);
+	o << "k,t,eps,F11,F22,F33,F12,P11,P12,P13,P21,P22,P23,P31,P32,P33,nu12,nu13,newton,krylov,substeps,failures,minres,"
+		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted\n";
+	o.precision(10);
+	for (const auto& p : r.pts) {
+		o << p.k << "," << p.t << "," << p.eps << "," << p.F[0] << "," << p.F[4] << "," << p.F[8] << "," << p.F[1];
+		for (int c = 0; c < 9; c++) o << "," << p.P[c];
+		o << "," << p.nu12 << "," << p.nu13 << "," << p.newton << "," << p.krylov << "," << p.substeps << "," << p.failures << ","
+		  << (p.minres ? 1 : 0) << "," << prec_name(p.prec) << "," << p.lam1 << "," << p.lam2 << "," << p.ell << ","
+		  << p.voidDistortedFrac << "\n";
+	}
 }
 
 }  // namespace fs

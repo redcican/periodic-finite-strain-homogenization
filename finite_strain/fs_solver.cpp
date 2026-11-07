@@ -86,6 +86,7 @@ Solver::~Solver() {
 }
 
 void Solver::setFree(const std::vector<int>& comps) {
+	if (comps == freeComps && sp.nF == int(comps.size())) return;  // keeps the LOBPCG starting block
 	freeComps = comps;
 	sp.nF = int(comps.size());
 	scalingReady = false;
