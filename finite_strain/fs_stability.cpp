@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -343,12 +344,23 @@ double Stability::supercell(double tol, int maxit, Prec p) {
 		sc->resetState();
 		sc->initScaling();
 	}
+	// the supercell is again the unit cube, so lengths halve: w -> w / 2 keeps F = Fbar + Grad w
 	tile_vector(n, S.u.w, sc->u.w);
+	vscale(0.5, sc->u.w, 3 * sc->cell.ne);
 	for (int k = 0; k < 9; k++) sc->u.f[k] = S.u.f[k];
 	sc->setPrescribed(S.Fbar);
-	if (!sc->evaluateCurrent()) return std::numeric_limits<double>::quiet_NaN();
+	if (!sc->evaluateCurrent()) {
+		if (std::getenv("FS_DEBUG")) std::fprintf(stderr, "supercell: state not admissible (J_gamma <= 0)\n");
+		return std::numeric_limits<double>::quiet_NaN();
+	}
 	bool havePrec = sc->buildPreconditioner(p, 0.f) || sc->buildPreconditioner(Prec::FP32, 0.f);
-	return sc->lambdaMin(sc->eig, tol, maxit, havePrec);
+	int it = 0;
+	bool conv = false;
+	double lam = sc->lambdaMin(sc->eig, tol, maxit, havePrec, &it, &conv);
+	if (std::getenv("FS_DEBUG"))
+		std::fprintf(stderr, "supercell: |g| = %.3e, preconditioner %s, LOBPCG %d iterations, %s, lambda = %.4e\n", sc->sp.norm(sc->g),
+			havePrec ? "ok" : "none", it, conv ? "converged" : "not converged", lam);
+	return lam;
 }
 
 double Stability::rankOne(double* AbarOut, double tol) {
