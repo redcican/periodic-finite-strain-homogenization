@@ -34,6 +34,7 @@ DEFINE_string(obj, "nu12", "fdcheck objective at load point -fd_k: nu12 (secant 
 DEFINE_int32(fd_k, 0, "fdcheck load point (default: the last one)");
 DEFINE_int32(fd_n, 6, "fdcheck: number of voxels to perturb");
 DEFINE_double(fd_h, 1e-3, "fdcheck: density perturbation");
+DEFINE_string(fd_out, "", "fdcheck: write the adjoint gradient dJ/drho as a .npy array of shape [n, n, n]");
 DEFINE_string(prog, "nu", "design program: nu (Poisson's ratio nu* = nustar + nuslope eps) or stiff (stiffening ratio -S)");
 DEFINE_double(nustar, 0.0, "design: prescribed Poisson's ratio at eps = 0");
 DEFINE_double(nuslope, 0.0, "design: slope of the prescribed Poisson's ratio");
@@ -159,6 +160,7 @@ int run_fdcheck_mode() {
 	fs::d2host(dJ, g.data(), g.size());
 	fs::dfree(dJ);
 	std::printf("J = %s(load point %d) = %.10e%s\n", FLAGS_obj.c_str(), K, J0, ok ? "" : "  (path or adjoint not converged)");
+	if (!FLAGS_fd_out.empty()) fs::write_npy(FLAGS_fd_out, n, g);
 	// voxels with intermediate density, spread over the cell
 	std::vector<size_t> pick;
 	for (size_t e = 0; e < rho.size() && int(pick.size()) < FLAGS_fd_n; e += 1 + rho.size() / (64 * size_t(FLAGS_fd_n)))

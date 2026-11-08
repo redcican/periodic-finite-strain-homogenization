@@ -163,6 +163,7 @@ struct PointRecord {
 	double lam2 = std::numeric_limits<double>::quiet_NaN();   // criterion 2, 2x2x2 supercell
 	double ell = std::numeric_limits<double>::quiet_NaN();    // criterion 3, min_n lambda_min(Q(n))
 	double voidDistortedFrac = 0;
+	double seconds = 0;  // wall time of the load step (Newton iterations, criteria and hook)
 };
 
 struct PathOptions {

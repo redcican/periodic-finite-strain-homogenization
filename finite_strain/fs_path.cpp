@@ -3,6 +3,7 @@
 #include "fs_stability.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 
@@ -38,6 +39,7 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 		int d = 0;
 		PointRecord rec;
 		rec.k = k;
+		auto t0 = std::chrono::steady_clock::now();
 		while (t < tk - 1e-12 * path.inc) {
 			s.sp.copy(s.u, backup);
 			double Fp[9];
@@ -106,6 +108,7 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 		if (po.crit2 && stab) rec.lam2 = stab->supercell(po.eigTol, po.eigMaxit, prec);
 		if (po.crit3 && stab) rec.ell = stab->rankOne();
 		if (po.onLoadPoint) po.onLoadPoint(k, s, rec);
+		rec.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 		if (s.opt.verbose)
 			std::printf("  k = %2d  t = %.4f  P11 = %+.6e  nu12 = %+.5f  newton = %2d  krylov = %5d  substeps = %d  %s%s\n", k,
 				tk, rec.P[0], rec.nu12, rec.newton, rec.krylov, rec.substeps, prec_name(rec.prec), rec.minres ? "  minres" : "");
@@ -124,14 +127,14 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 void write_path_csv(const std::string& file, const PathResult& r) {
 	std::ofstream o(file);
 	o << "k,t,eps,F11,F22,F33,F12,P11,P12,P13,P21,P22,P23,P31,P32,P33,nu12,nu13,newton,krylov,substeps,failures,minres,"
-		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted\n";
+		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted,seconds\n";
 	o.precision(10);
 	for (const auto& p : r.pts) {
 		o << p.k << "," << p.t << "," << p.eps << "," << p.F[0] << "," << p.F[4] << "," << p.F[8] << "," << p.F[1];
 		for (int c = 0; c < 9; c++) o << "," << p.P[c];
 		o << "," << p.nu12 << "," << p.nu13 << "," << p.newton << "," << p.krylov << "," << p.substeps << "," << p.failures << ","
 		  << (p.minres ? 1 : 0) << "," << prec_name(p.prec) << "," << p.lam1 << "," << p.lam2 << "," << p.ell << ","
-		  << p.voidDistortedFrac << "\n";
+		  << p.voidDistortedFrac << "," << p.seconds << "\n";
 	}
 }
 

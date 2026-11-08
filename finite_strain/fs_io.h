@@ -12,5 +12,8 @@ std::vector<float> read_density(const std::string& path, int& n);
 // Periodic trilinear resampling of an ns^3 field (voxel centres) to nt^3.
 std::vector<float> resample_periodic(const std::vector<float>& src, int ns, int nt);
 void write_density_vdb(const std::string& path, int n, const std::vector<float>& rho);
+// Writes an n^3 field given in the lexicographic order x + n (y + n z) as a float64 .npy array of shape
+// [n, n, n] indexed [x, y, z] (the layout read_density expects).
+void write_npy(const std::string& path, int n, const std::vector<double>& v);
 
 }  // namespace fs

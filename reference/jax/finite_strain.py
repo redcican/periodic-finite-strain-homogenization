@@ -527,3 +527,29 @@ class Mixed:
         w, F = self.unpack(z, Fb)
         log["z"], log["g0"] = z, g0
         return w, F, log
+
+    def grad_rho(self, z, Fbar, G, dz=None, cg_tol=1e-10, cg_maxit=20000):
+        """Adjoint gradient with respect to rho of q = <G, Pbar> + <dz, z> at the mixed equilibrium z
+        (G a 3x3 weight on the macroscopic stress, dz an optional weight on the unknowns, e.g. on a free
+        component of Fbar). Pbar_ij = dE/dFbar_ij, with the free components taken from the unknowns.
+        One bordered adjoint CG solve; the sensitivity runs through the stiffness scale and the void
+        interpolation as in Cell.grad_rho. Returns (gradient (n, n, n), log)."""
+        Fb = jnp.asarray(Fbar, dtype=jnp.float64)
+        G = jnp.asarray(G, dtype=jnp.float64)
+        n, nw, idx, cell = self.n, self.nw, self.idx, self.c
+        dz = jnp.zeros(nw + len(self.free)) if dz is None else jnp.asarray(dz, dtype=jnp.float64)
+
+        def Ez(z_, Fb_, r_):
+            return cell.energy(z_[:nw].reshape(n, n, n, 3), Fb_.at[idx].set(z_[nw:]), r_)
+
+        def q(z_, r_):
+            P = jax.grad(Ez, argnums=1)(z_, Fb, r_)
+            P = P.at[idx].set(jax.grad(Ez, argnums=0)(z_, Fb, r_)[nw:])
+            return jnp.sum(G * P) + jnp.vdot(dz, z_)
+
+        dq_dz = self._proj(jax.grad(q, argnums=0)(z, cell.rho))
+        Minv = self._minv(z, Fb)
+        lam, its, ok = self._cg(z, Fb, dq_dz, Minv, cg_tol, int(cg_maxit))
+        dq_dr = jax.grad(q, argnums=1)(z, cell.rho)
+        coupling = jax.grad(lambda r_: jnp.vdot(lam, jax.grad(Ez, argnums=0)(z, Fb, r_)))(cell.rho)
+        return dq_dr - coupling, dict(cg=int(its), converged=bool(ok))

@@ -122,6 +122,24 @@ std::vector<float> resample_periodic(const std::vector<float>& src, int ns, int 
 	return out;
 }
 
+void write_npy(const std::string& path, int n, const std::vector<double>& v) {
+	std::ofstream out(path, std::ios::binary);
+	if (!out) throw std::runtime_error("cannot write " + path);
+	std::string hdr = "{'descr': '<f8', 'fortran_order': False, 'shape': (" + std::to_string(n) + ", " + std::to_string(n) + ", " +
+		std::to_string(n) + "), }";
+	while ((10 + hdr.size() + 1) % 64) hdr += ' ';
+	hdr += '\n';
+	out.write("\x93NUMPY\x01\x00", 8);
+	unsigned char hl[2] = {(unsigned char)(hdr.size() & 255), (unsigned char)(hdr.size() >> 8)};
+	out.write(reinterpret_cast<const char*>(hl), 2);
+	out.write(hdr.data(), std::streamsize(hdr.size()));
+	std::vector<double> raw(v.size());
+	for (int x = 0; x < n; x++)
+		for (int y = 0; y < n; y++)
+			for (int z = 0; z < n; z++) raw[z + size_t(n) * (y + size_t(n) * x)] = v[x + size_t(n) * (y + size_t(n) * z)];
+	out.write(reinterpret_cast<const char*>(raw.data()), std::streamsize(raw.size() * sizeof(double)));
+}
+
 void write_density_vdb(const std::string& path, int n, const std::vector<float>& rho) {
 	int gs[3] = {n, n, n};
 	openvdb_wrapper_t<float>::lexicalGrid2openVDBfile(path, gs, rho);
