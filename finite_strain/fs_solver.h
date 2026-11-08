@@ -20,7 +20,8 @@ struct SolverOptions {
 	double E = 10, nu = 0.3;              // base material
 	double beta = 500, rho0 = 0.01;       // energy interpolation
 	double p = 3, rhomin = 1e-9;          // stiffness scaling
-	double newtonTol = 1e-6;              // ||g|| <= newtonTol ||g_0||
+	double newtonTol = 1e-6;              // ||g|| <= max(newtonTol ||g_0||, newtonFloor u32 ||f_e||), ||f_e|| the norm of the
+	double newtonFloor = 64;              // element forces the FP32 residual is assembled from (its rounding level)
 	int newtonMax = 12;
 	int lsMax = 8;                        // line-search halvings
 	double armijo = 1e-4;

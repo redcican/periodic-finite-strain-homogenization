@@ -133,7 +133,7 @@ Options of the path mode:
 ./build/fs3d -mode path -in out/rho -reso 128 -path L2 -crit 123 -prefix out/
 ```
 
-The load points are written to `<prefix>/path_<L>.csv`: $\bar F$, $\bar P$, the secant Poisson's ratios, Newton and Krylov iterations, substeps, coarse precision and the three stability measures.
+The load points are written to `<prefix>/path_<L>.csv` with the columns `k, t, eps, F11, F22, F33, F12, P11 .. P33` (row-major $\bar P$), `nu12, nu13` (secant Poisson's ratios $-(\bar F_{22}-1)/\varepsilon$, $-(\bar F_{33}-1)/\varepsilon$), `newton, krylov, substeps, failures, minres, prec`, the stability measures `lambda_cell, lambda_supercell, ellipticity` (NaN where not evaluated), `void_distorted` and `seconds` (wall time of the load step). `-nostop_distortion` continues the path when void voxels invert.
 
 Small-strain moduli and third-order elastic constants (`-mode toec`): six corrector solves at $\bar F=I$ give $C^H$ and, by the $2n+1$ rule, the 56 constants $T_{IJK}$ of $\bar W=\tfrac12 C^H[\bar E,\bar E]+\tfrac16 T[\bar E,\bar E,\bar E]$ (Voigt order 11, 22, 33, 23, 13, 12 with engineering shears), written to `<prefix>/moduli.txt`:
 
@@ -144,8 +144,10 @@ Small-strain moduli and third-order elastic constants (`-mode toec`): six correc
 Adjoint sensitivities (`-mode fdcheck`): the gradient of $\nu_{12}$ (`-obj nu12`) or $\bar P_{11}$ (`-obj P11`) at load point `-fd_k` of a path with respect to the voxel densities, from one bordered adjoint solve, against central differences on `-fd_n` voxels with step `-fd_h`:
 
 ```shell
-./build/fs3d -mode fdcheck -in rho32.npy -path L1 -steps 5 -obj nu12 -prec fp32 -fd_n 6
+./build/fs3d -mode fdcheck -in rho32.npy -path L1 -steps 5 -obj P11 -prec fp32 -fd_n 6 -fd_out grad.npy
 ```
+
+`-fd_out` writes the adjoint gradient $\partial J/\partial\bar\rho$ as a float64 `.npy` array of shape $[n,n,n]$ (same layout as the input); `-fd_n 0` skips the finite differences. The central differences of the FP32 solver resolve single-voxel derivatives only with a large step (`-fd_h 0.1` or more); the reference check (`reference/fs3d_check`) compares the whole gradient with the FP64 adjoint instead.
 
 Finite-strain design (`-mode design`): the design variables live on one forty-eighth of the cell and are mapped to the full cell by the reflections of the cube, filtered with a periodic hat filter of radius $n/32$ voxels (`-filter_r`) and projected with a Heaviside function whose sharpness doubles every 40 iterations up to 32. Each iteration evaluates $C^H$ from the six correctors, path `L1` with the load steps as load points (criterion 1 every second step) and one adjoint per load point, and updates the design by MMA; a design whose load path fails is rejected and the step repeated with half the move limit.
 
@@ -159,6 +161,8 @@ Finite-strain design (`-mode design`): the design variables live on one forty-ei
 ```
 
 The run writes `<prefix>/design.csv` (objective, largest deviation, $V/V^*$, $E^H/E^*$ per iteration), the densities `<prefix>/rho_<iter>.vdb` and `<prefix>/rho_design.vdb`, and, for the design thresholded at 0.5, `<prefix>/rho_thresholded.vdb` with its path `L1` in increments of 0.005 and all three stability criteria (`<prefix>/final_L1.csv`).
+
+Diagnostics: `FS_DEBUG=1` reports which stage of a preconditioner build is not positive definite; `-mode mgcheck -in <cell>` compares the first coarse Galerkin stencil with $P^T K P$ applied to unit vectors. `reference/fs3d_check/check.py` runs `fs3d` against the reference solver below (see its README).
 
 #### Finite-strain reference solver
 

@@ -148,7 +148,7 @@ int run_fdcheck_mode() {
 	int n = 0;
 	std::vector<float> rho = load_density(n);
 	fs::SolverOptions o = solver_options();
-	o.verbose = 0;
+	o.verbose = FLAGS_verbose >= 2 ? FLAGS_verbose : 0;  // the finite differences repeat the path many times
 	fs::Solver S(n, rho, o);
 	fs::LoadPath path = fs::make_path(FLAGS_path, FLAGS_steps, FLAGS_inc);
 	if (FLAGS_obj == "nu12" && path.freeComps.empty()) throw std::runtime_error("nu12 requires path L1 or L2");

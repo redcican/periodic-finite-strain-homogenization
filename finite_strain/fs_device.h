@@ -39,13 +39,15 @@ void cell_cache_update(const Cell& c, const float* w, const double FbarMinusI[9]
 struct EnergyOut {
 	double energy = 0;          // Pi_h
 	double absEnergy = 0;       // sum of omega s |psi|, the scale of the rounding level of Pi_h
+	double fnorm = 0;           // root of the summed squared element forces, the scale of the rounding level of r
 	long long badJ = 0;         // Gauss points with J_gamma <= 0
 	long long voidDistorted = 0;  // void voxels with J < 0.1 at a Gauss point
 };
 void cell_energy(const Cell& c, EnergyOut& out);
 
-// r = dPi_h/dw (3 n^3), Pbar = <s P>.
-void cell_residual(const Cell& c, float* r, double Pbar[9]);
+// r = dPi_h/dw (3 n^3), Pbar = <s P>, fnorm = the root of the summed squared element forces (the scale
+// of the FP32 rounding of r, which is assembled from them).
+void cell_residual(const Cell& c, float* r, double Pbar[9], double* fnorm = nullptr);
 
 // y = K_T x + B dF and t = <s A[Grad x + dF]> (the second gives B^T x + D dF on the free components).
 // x == nullptr means x = 0; t == nullptr skips the reduction.

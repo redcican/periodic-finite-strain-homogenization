@@ -129,7 +129,7 @@ bool Solver::evaluate(const BVec& state, BVec& grad, double P[9], EnergyOut& e) 
 	cell_cache_update(cell, state.w, H);
 	cell_energy(cell, e);
 	if (e.badJ > 0 || !std::isfinite(e.energy)) return false;
-	cell_residual(cell, grad.w, P);
+	cell_residual(cell, grad.w, P, &e.fnorm);
 	for (int k = 0; k < sp.nF; k++) grad.f[k] = P[freeComps[k]];
 	for (int c = 0; c < 9; c++)
 		if (!std::isfinite(P[c])) return false;
@@ -293,7 +293,10 @@ StepStats Solver::newtonSolve(Prec p) {
 	for (int j = 0;; j++) {
 		double gn = sp.norm(g);
 		st.gend = gn;
-		if (gn <= opt.newtonTol * g0) break;
+		// converged at the relative tolerance or at the rounding level of the FP32 residual
+		double floor = opt.newtonFloor * kU32 * en.fnorm;
+		if (opt.verbose >= 2) std::printf("    newton %2d  |g|/|g0| = %.3e  |g| / (u32 |f_e|) = %.3e\n", j, gn / g0, gn / (kU32 * en.fnorm));
+		if (gn <= std::max(opt.newtonTol * g0, floor)) break;
 		if (j >= opt.newtonMax) {
 			st.fail = StepFail::NewtonMaxIter;
 			break;

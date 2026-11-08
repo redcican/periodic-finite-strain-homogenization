@@ -181,7 +181,7 @@ __global__ void k_energy(int n, size_t ne, Material m, const float* s, const flo
 __global__ void k_residual(int n, int color, size_t ne, Material m, const float* s, const float* gam, const float* Hc,
 	float om, float* r, double* Pbar) {
 	size_t t = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
-	double acc[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+	double acc[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};  // <s P> and the squared element forces (rounding scale of r)
 	int i, j, k;
 	if (colour_voxel(n, color, t, i, j, k)) {
 		size_t e = nid(i, j, k, n);
@@ -208,9 +208,12 @@ __global__ void k_residual(int n, int color, size_t ne, Material m, const float*
 #pragma unroll
 		for (int l = 0; l < 8; l++)
 #pragma unroll
-			for (int a = 0; a < 3; a++) r[nd[l] * 3 + a] += fe[l * 3 + a];
+			for (int a = 0; a < 3; a++) {
+				r[nd[l] * 3 + a] += fe[l * 3 + a];
+				acc[9] += double(fe[l * 3 + a]) * double(fe[l * 3 + a]);
+			}
 	}
-	block_sum_atomic<9>(acc, Pbar);
+	block_sum_atomic<10>(acc, Pbar);
 }
 
 __global__ void k_product(int n, int color, size_t ne, Material m, const float* s, const float* gam, const float* Hc,
@@ -647,16 +650,20 @@ void cell_energy(const Cell& c, EnergyOut& out) {
 	out.voidDistorted = (long long)(h[3] + 0.5);
 }
 
-void cell_residual(const Cell& c, float* r, double Pbar[9]) {
+void cell_residual(const Cell& c, float* r, double Pbar[9], double* fnorm) {
 	FS_CUDA(cudaMemset(r, 0, 3 * c.ne * sizeof(float)));
 	double* d = scratch();
-	FS_CUDA(cudaMemset(d, 0, 9 * sizeof(double)));
+	FS_CUDA(cudaMemset(d, 0, 10 * sizeof(double)));
 	size_t n8 = c.ne / 8;
 	for (int color = 0; color < 8; color++) {
 		k_residual<<<nblocks(n8, 128), 128>>>(c.n, color, c.ne, c.mat, c.s, c.gam, c.Hc, omega(c), r, d);
 		FS_KERNEL_CHECK();
 	}
-	if (Pbar) FS_CUDA(cudaMemcpy(Pbar, d, 9 * sizeof(double), cudaMemcpyDeviceToHost));
+	double h[10];
+	FS_CUDA(cudaMemcpy(h, d, sizeof(h), cudaMemcpyDeviceToHost));
+	if (Pbar)
+		for (int k = 0; k < 9; k++) Pbar[k] = h[k];
+	if (fnorm) *fnorm = std::sqrt(h[9]);
 }
 
 void cell_product(const Cell& c, const float* x, const double dF[9], float* y, double t[9]) {
