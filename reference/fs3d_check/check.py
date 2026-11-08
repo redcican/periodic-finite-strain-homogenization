@@ -153,20 +153,24 @@ class Oracle:
         byeps = {round(r["eps"], 10): r for r in rows}
         return {k: np.array([byeps[round(e, 10)][k] for e in eps]) for k in rows[0]}
 
-    def grad_P11(self, eps):
-        """d Pbar_11 / d rho (physical density) under uniaxial stress at F11 = 1 + eps."""
-        f = self.cache / f"oracle_grad_P11_{eps:.4f}.npy"
+    def grad(self, obj, eps):
+        """d J / d rho (physical density) under uniaxial stress at F11 = 1 + eps, J = Pbar_11 ("P11") or the secant
+        Poisson's ratio nu12 = -(Fbar_22 - 1) / eps ("nu12")."""
+        f = self.cache / f"oracle_grad_{obj}_{eps:.4f}.npy"
         if f.exists():
             return np.load(f)
         z = None
         for e in np.arange(1, 6) * eps / 5:  # five steps to the load point, as fs3d
             w, F, log = self.mix.solve(np.diag([1 + e, 1.0, 1.0]), z0=z, rtol=1e-10)
             z = log["z"]
-        G = np.zeros((3, 3))
-        G[0, 0] = 1.0
-        g, log = self.mix.grad_rho(z, F, G)
+        G, dz = np.zeros((3, 3)), np.zeros(self.mix.nw + 2)
+        if obj == "P11":
+            G[0, 0] = 1.0
+        else:
+            dz[self.mix.nw + 0] = -1.0 / eps  # free unknown 0 is Fbar_22
+        g, log = self.mix.grad_rho(z, F, G, dz=dz)
         g = np.asarray(g) * 3 * self.rho**2  # chain rule: stiffness density rho^3
-        print(f"    oracle adjoint: cg {log['cg']}{'' if log['converged'] else '  NOT CONVERGED'}")
+        print(f"    oracle adjoint of {obj}: cg {log['cg']}{'' if log['converged'] else '  NOT CONVERGED'}")
         np.save(f, g)
         return g
 
@@ -287,8 +291,16 @@ def item2(fsd, cell, npy, out, orc, res, emax, de, crit):
         nu_or = -(orow["F22"] - 1) / orow["eps"]
         relP = np.abs(p["P11"] - orow["P11"]) / np.abs(orow["P11"])
         dnu = np.abs(nu_fs - nu_or)
+        # beyond the first load point with lambda_cell <= 0 the fundamental branch is unstable and the two
+        # solvers may follow different branches: compare the stable part only
+        lam = p["lambda_cell"]
+        unstable = np.where(np.isfinite(lam) & (lam <= 0))[0]
+        last = int(unstable[0]) if len(unstable) else len(eps) - 1
+        relP, dnu = relP[: last + 1], dnu[: last + 1]
         sec = p["seconds"] if "seconds" in p else np.full(len(eps), np.nan)
         status = "completed" if len(p["eps"]) == nsteps else f"{len(p['eps'])}/{nsteps} points"
+        if len(unstable):
+            status += f", cell unstable from eps {eps[last]:+.3f} (compared up to there)"
         print(f"  [2] {name}: {status}, eps to {eps[-1]:+.3f}; max rel |dP11| {relP.max():.2e}, max |dnu| {dnu.max():.2e}; "
               f"newton/step {p['newton'].mean():.1f} (max {int(p['newton'].max())}), krylov/step {p['krylov'].mean():.0f}, "
               f"{np.nansum(sec):.2f}s fs3d ({dt:.1f}s wall) vs {orow['seconds'].sum():.0f}s oracle; "
@@ -298,7 +310,7 @@ def item2(fsd, cell, npy, out, orc, res, emax, de, crit):
                   f"newton {int(p['newton'][i])} krylov {int(p['krylov'][i])} {sec[i]:.3f}s"
                   + (f"  lambda {p['lambda_cell'][i]:+.3e}" if np.isfinite(p["lambda_cell"][i]) else ""))
         ok = relP.max() <= 1e-3 and dnu.max() <= 1e-3 and len(p["eps"]) == nsteps
-        res.append((cell, 2, f"{name} to eps={eps[-1]:+.2f}: max rel |dP11| / max |dnu|", f"{relP.max():.1e} / {dnu.max():.1e}",
+        res.append((cell, 2, f"{name} to eps={eps[last]:+.2f}: max rel |dP11| / max |dnu|", f"{relP.max():.1e} / {dnu.max():.1e}",
                     "pass" if ok else "FAIL"))
         res.append((cell, 2, f"{name} Newton per step (mean/max), fs3d seconds per path", f"{p['newton'].mean():.1f}/{int(p['newton'].max())}, {np.nansum(sec):.2f}s", ""))
 
@@ -316,13 +328,21 @@ def item3(fsd, cell, npy, out, orc, res, fd_h, fd_n):
         if line.startswith("voxel"):
             print("      " + line.strip())
     g = np.load(o / "grad_fs3d.npy")
-    go = orc.grad_P11(0.1)
+    go = orc.grad("P11", 0.1)
     rel = np.linalg.norm(g - go) / np.linalg.norm(go)
     cos = float(np.sum(g * go) / np.linalg.norm(g) / np.linalg.norm(go))
     print(f"  [3] dP11/drho at eps = 0.1 (L1, 5 steps): fs3d adjoint vs fs3d central differences (h = {fd_h}, {fd_n} voxels): "
           f"worst rel {worst:.2e}; vs oracle adjoint: rel L2 {rel:.2e}, cosine {cos:.8f} ({dt:.1f}s)")
-    res.append((cell, 3, f"adjoint vs fs3d central differences (h={fd_h}, FP32 solves)", f"{worst:.1e}", "pass" if worst <= 0.1 else "FAIL"))
-    res.append((cell, 3, "adjoint vs oracle adjoint, rel. L2", f"{rel:.1e}", "pass" if rel <= 1e-3 else "FAIL"))
+    res.append((cell, 3, f"adjoint of P11 vs fs3d central differences (h={fd_h}, FP32 solves)", f"{worst:.1e}", "pass" if worst <= 0.1 else "FAIL"))
+    res.append((cell, 3, "adjoint of P11 vs oracle adjoint, rel. L2", f"{rel:.1e}", "pass" if rel <= 1e-3 else "FAIL"))
+    # the secant Poisson's ratio (objective of the design mode), adjoint only
+    txt, dt, rc = fsd.run(["-mode", "fdcheck", "-in", npy, "-path", "L1", "-steps", 5, "-inc", 0.02, "-obj", "nu12", "-prec",
+                           "fp32", "-fd_n", 0, "-fd_out", o / "grad_nu12_fs3d.npy"], o / "log_nu12.txt")
+    g = np.load(o / "grad_nu12_fs3d.npy")
+    go = orc.grad("nu12", 0.1)
+    rel = np.linalg.norm(g - go) / np.linalg.norm(go)
+    print(f"  [3] dnu12/drho at eps = 0.1: fs3d adjoint vs oracle adjoint: rel L2 {rel:.2e} ({dt:.1f}s)")
+    res.append((cell, 3, "adjoint of nu12 vs oracle adjoint, rel. L2", f"{rel:.1e}", "pass" if rel <= 1e-3 else "FAIL"))
 
 
 def item4(cell, CT, orc, res, delta):
@@ -356,17 +376,18 @@ def item5(fsd, cell, npy, out, orc, res, emin, de):
     nsteps = int(round(abs(emin) / de))
     o = out / "stability_L2"
     o.mkdir(exist_ok=True)
+    tile2 = (orc.cache / "oracle_stability_tile2.csv").exists()  # supercell reference (stability_path.py --tile 2)
     txt, dt, rc = fsd.run(["-mode", "path", "-in", npy, "-prefix", f"{o}/", "-path", "L2", "-steps", nsteps, "-inc", de, "-prec",
-                           fsd.prec, "-crit", "1", "-nostop_distortion"], o / "log.txt")
+                           fsd.prec, "-crit", "12" if tile2 else "1", "-nostop_distortion"], o / "log.txt")
     p = read_path_csv(o / "path_L2.csv")
     lam0 = np.nan
     for line in txt.splitlines():
-        if "lambda_min(0)" in line:
+        if line.strip().startswith("lambda_min(0) ="):
             lam0 = float(line.split("=")[1])
     eps = -de * np.arange(1, len(p["eps"]) + 1)
     lam0o, lamo = orc.stability(list(eps))
     r_fs, r_or = p["lambda_cell"] / lam0, lamo / lam0o
-    first = lambda r, e: (e[np.argmax(r <= 0)] if np.any(r <= 0) else np.nan)  # noqa: E731
+    first = lambda r, e: (e[np.argmax(np.nan_to_num(r, nan=1.0) <= 0)] if np.any(np.nan_to_num(r, nan=1.0) <= 0) else np.nan)  # noqa: E731
     e_fs, e_or = first(r_fs, eps), first(r_or, eps)
     print(f"  [5] lambda_min(0): fs3d {lam0:.4e}, oracle {lam0o:.4e} (rel {abs(lam0 - lam0o) / lam0o:.1e})")
     for i in range(len(eps)):
@@ -375,8 +396,22 @@ def item5(fsd, cell, npy, out, orc, res, emin, de):
     dmax = np.nanmax(np.abs(r_fs - r_or))
     ok = (np.isnan(e_fs) and np.isnan(e_or)) or abs(e_fs - e_or) <= de + 1e-12
     print(f"  [5] first lambda_min <= 0: fs3d eps {e_fs}, oracle eps {e_or}; max |d(lambda/lambda0)| {dmax:.2e} ({dt:.1f}s fs3d)")
-    res.append((cell, 5, "first-instability strain fs3d / oracle", f"{e_fs} / {e_or}", "pass" if ok else "FAIL"))
-    res.append((cell, 5, "max |d(lambda/lambda0)| along L2", f"{dmax:.1e}", "pass" if dmax <= 0.05 else "FAIL"))
+    res.append((cell, 5, "cell criterion: first-instability strain fs3d / oracle", f"{e_fs} / {e_or}", "pass" if ok else "FAIL"))
+    res.append((cell, 5, "cell criterion: max |d(lambda/lambda0)| along L2", f"{dmax:.1e}", "pass" if dmax <= 0.05 else "FAIL"))
+    if tile2:
+        with open(orc.cache / "oracle_stability_tile2.csv", newline="") as fh:
+            rows = {round(float(r["eps"]), 10): float(r["lam1"]) for r in csv.DictReader(fh)}
+        have = np.array([round(e, 10) in rows for e in eps])
+        lo = np.array([rows.get(round(e, 10), np.nan) for e in eps])
+        lf = p["lambda_supercell"]
+        rel = np.abs(lf - lo) / np.nanmax(np.abs(lo))
+        e2_fs, e2_or = first(np.where(have, lf, np.nan), eps), first(lo, eps)
+        for i in np.where(have)[0]:
+            print(f"      eps {eps[i]:+.3f}  supercell lambda fs3d {lf[i]:+.4e}  oracle {lo[i]:+.4e}")
+        ok2 = (np.isnan(e2_fs) and np.isnan(e2_or)) or abs(e2_fs - e2_or) <= de + 1e-12
+        print(f"  [5] supercell: first lambda_min <= 0: fs3d eps {e2_fs}, oracle eps {e2_or}; max |d lambda| / max |lambda| {np.nanmax(rel):.2e}")
+        res.append((cell, 5, "supercell criterion: first-instability strain fs3d / oracle", f"{e2_fs} / {e2_or}", "pass" if ok2 else "FAIL"))
+        res.append((cell, 5, "supercell criterion: max |d lambda| / max |lambda|", f"{np.nanmax(rel):.1e}", "pass" if np.nanmax(rel) <= 0.05 else "FAIL"))
 
 
 def main():

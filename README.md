@@ -112,11 +112,11 @@ HOMO_CUSTOM=p1 P1_MODE=evalfield ./build/homo3d -obj custom -reso 16 -relthres 1
 
 `fs3d` follows a load path of a cell with the energy of a compressible neo-Hookean solid and the void interpolation of Wang et al. (2014), $s=\rho_{\min}+\bar\rho^{3}$. The density is the physical density $\bar\rho\in[0,1]$, read from an OpenVDB file (e.g. the `rho` output of `homo3d`, with `-reso`) or a `.npy` array of shape $[n,n,n]$; $n$ must be $8\cdot2^L$ (16, 32, 64, 128, 256).
 
-* Newton iterations with the Eisenstat-Walker forcing terms, a backtracking line search on the cell energy (with a residual merit function beyond an instability), mixed macroscopic control through a bordered Hessian;
+* Newton iterations with the Eisenstat-Walker forcing terms, a backtracking line search on the cell energy (with a residual merit function beyond an instability), mixed macroscopic control through a bordered Hessian; an iteration has converged at $\|\mathsf g\|\le10^{-6}\|\mathsf g_0\|$ (`-newton_tol`) or at the rounding level $64\,u_{32}\|\mathsf f_e\|$ of the FP32 residual, $\|\mathsf f_e\|$ being the norm of the element forces it is assembled from;
 * PCG preconditioned by a multigrid V-cycle; MINRES with a shifted preconditioner once the tangent is indefinite;
 * matrix-free FP32 fine level from a deformation-gradient cache, Galerkin coarse operators stored in FP16 in the symmetric scaling $Z^{-1/2}KZ^{-1/2}$, FP64 dense solve on the $8^3$ grid;
 * step control: a failed step is repeated with FP32 coarse stencils, then divided into substeps (at most three divisions); `-prec adaptive` switches to FP32 stencils once the extrapolated smallest eigenvalue falls below 10 % of its initial value;
-* stability criteria: smallest eigenvalue of the scaled tangent of the cell (LOBPCG), of a $2\times2\times2$ supercell, and rank-one ellipticity of the effective tangent.
+* stability criteria: smallest eigenvalue of the scaled tangent of the cell (LOBPCG), of a $2\times2\times2$ supercell carrying the tiled state, and rank-one ellipticity of the effective tangent. Beyond the first load point with a negative eigenvalue the path continues on the fundamental branch (MINRES on the indefinite tangent), which is then a saddle.
 
 Options of the path mode:
 
