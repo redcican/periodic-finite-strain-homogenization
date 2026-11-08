@@ -4,6 +4,10 @@
 
 #include <cusolverDn.h>
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 namespace fs {
 
 namespace {
@@ -264,27 +268,53 @@ __global__ void k_dense(int nc, const float* S32, double* Kd, int M) {
 			Kd[(A * 3 + a) + (B * 3 + b) * size_t(M)] = double(S32[size_t(oi * 9 + a * 3 + b) * Nc + A]);
 }
 
-__global__ void k_dense_trace(const double* Kd, int M, double* out) {
-	double v[1] = {0.0};
-	for (int r = blockIdx.x * blockDim.x + threadIdx.x; r < M; r += gridDim.x * blockDim.x) v[0] += Kd[r + size_t(r) * M];
-	block_sum_atomic<1>(v, out);
+// dsc = 1 / sqrt(diag K); counts non-positive diagonal entries.
+__global__ void k_dense_diag(const double* Kd, int M, double* dsc, int* notpd) {
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= M) return;
+	double d = Kd[i + size_t(i) * M];
+	if (!(d > 0)) {
+		atomicAdd(notpd, 1);
+		d = 1.0;
+	}
+	dsc[i] = 1.0 / sqrt(d);
 }
 
-__global__ void k_dense_addN(double* Kd, int M, double c) {
+__global__ void k_dense_scale(double* Kd, int M, const double* dsc) {
 	size_t t = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
 	if (t >= size_t(M) * M) return;
 	int r = int(t % M), col = int(t / M);
-	if (r % 3 == col % 3) Kd[t] += c;
+	Kd[t] *= dsc[r] * dsc[col];
 }
 
-__global__ void k_f2d(const float* f, double* d, int M) {
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i < M) d[i] = f[i];
+// |q_c|^2 = sum_A d_(A, c) for the three scaled translations q_c = D^{1/2} 1_c (one block).
+__global__ void k_qnorm(const double* dsc, int M, double* out) {
+	double v[3] = {0.0, 0.0, 0.0};
+	for (int i = threadIdx.x; i < M; i += blockDim.x) v[i % 3] += 1.0 / (dsc[i] * dsc[i]);
+	if (threadIdx.x < 3) out[threadIdx.x] = 0.0;
+	__syncthreads();
+	block_sum_atomic<3>(v, out);
 }
 
-__global__ void k_d2f(const double* d, float* f, int M) {
+// Kd += sum_c q_c q_c^T / |q_c|^2 with (q_c)_(A, c) = sqrt(d_(A, c)) = 1 / dsc.
+__global__ void k_dense_addQ(double* Kd, int M, const double* dsc, double q0, double q1, double q2) {
+	size_t t = blockIdx.x * size_t(blockDim.x) + threadIdx.x;
+	if (t >= size_t(M) * M) return;
+	int r = int(t % M), col = int(t / M);
+	int c = r % 3;
+	if (c != col % 3) return;
+	double qn = c == 0 ? q0 : (c == 1 ? q1 : q2);
+	Kd[t] += 1.0 / (dsc[r] * dsc[col] * qn);
+}
+
+__global__ void k_f2d(const float* f, double* d, const double* dsc, int M) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i < M) f[i] = float(d[i]);
+	if (i < M) d[i] = double(f[i]) * dsc[i];
+}
+
+__global__ void k_d2f(const double* d, float* f, const double* dsc, int M) {
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < M) f[i] = float(d[i] * dsc[i]);
 }
 
 int* counter() {
@@ -292,6 +322,8 @@ int* counter() {
 	if (!p) FS_CUDA(cudaMalloc(&p, sizeof(int)));
 	return p;
 }
+
+const bool debug = std::getenv("FS_DEBUG") != nullptr;
 
 int read_counter() {
 	int h = 0;
@@ -321,9 +353,10 @@ void Multigrid::release() {
 	dfree(Kd);
 	dfree(dwork);
 	dfree(drhs);
+	dfree(dsc);
 	dfree(dinfo);
 	Dinv0 = f0 = r0 = ws = nullptr;
-	Kd = dwork = drhs = nullptr;
+	Kd = dwork = drhs = dsc = nullptr;
 	dinfo = nullptr;
 	if (handle) cusolverDnDestroy(static_cast<cusolverDnHandle_t>(handle));
 	handle = nullptr;
@@ -366,6 +399,7 @@ void Multigrid::init(int n) {
 	Md = int(3 * lv[L].N);
 	FS_CUDA(cudaMalloc(&Kd, size_t(Md) * Md * sizeof(double)));
 	FS_CUDA(cudaMalloc(&drhs, size_t(Md) * sizeof(double)));
+	FS_CUDA(cudaMalloc(&dsc, size_t(Md) * sizeof(double)));
 	FS_CUDA(cudaMalloc(&dinfo, sizeof(int)));
 	cusolverDnHandle_t h;
 	if (cusolverDnCreate(&h) != CUSOLVER_STATUS_SUCCESS) {
@@ -416,32 +450,43 @@ bool Multigrid::factor_dense(const float* S32) {
 	FS_CUDA(cudaMemset(Kd, 0, size_t(Md) * Md * sizeof(double)));
 	k_dense<<<nblocks(v.N * 27, 256), 256>>>(v.n, S32, Kd, Md);
 	FS_KERNEL_CHECK();
-	FS_CUDA(cudaMemset(drhs, 0, sizeof(double)));
-	k_dense_trace<<<8, 256>>>(Kd, Md, drhs);
+	// Symmetric Jacobi scaling D^{-1/2} K D^{-1/2}: the void stiffness (rho_min) is far below the FP32
+	// rounding of the solid entries, so the unscaled matrix is indefinite at round-off level; in the
+	// scaled matrix every mode has O(1) weight and only the three translations are (near-)null.
+	FS_CUDA(cudaMemset(counter(), 0, sizeof(int)));
+	k_dense_diag<<<nblocks(Md, 256), 256>>>(Kd, Md, dsc, counter());
 	FS_KERNEL_CHECK();
-	double tr = 0;
-	FS_CUDA(cudaMemcpy(&tr, drhs, sizeof(double), cudaMemcpyDeviceToHost));
-	if (!(tr > 0)) return false;
-	// K + alpha N N^T with N the normalized translations removes the null space of the coarsest operator.
-	double alpha = tr / Md;
-	k_dense_addN<<<nblocks(size_t(Md) * Md, 256), 256>>>(Kd, Md, alpha / double(v.N));
+	if (read_counter() != 0) return false;
+	k_dense_scale<<<nblocks(size_t(Md) * Md, 256), 256>>>(Kd, Md, dsc);
+	FS_KERNEL_CHECK();
+	// The scaled translations q_c = D^{1/2} 1_c span the null space: add q_c q_c^T / |q_c|^2 (unit diagonal
+	// scale) so that the factorization exists; right-hand sides orthogonal to 1_c are solved exactly.
+	double qn[3];
+	k_qnorm<<<1, 256>>>(dsc, Md, drhs);
+	FS_KERNEL_CHECK();
+	FS_CUDA(cudaMemcpy(qn, drhs, 3 * sizeof(double), cudaMemcpyDeviceToHost));
+	for (int c = 0; c < 3; c++)
+		if (!(qn[c] > 0)) return false;
+	k_dense_addQ<<<nblocks(size_t(Md) * Md, 256), 256>>>(Kd, Md, dsc, qn[0], qn[1], qn[2]);
 	FS_KERNEL_CHECK();
 	auto h = static_cast<cusolverDnHandle_t>(handle);
-	if (cusolverDnDpotrf(h, CUBLAS_FILL_MODE_LOWER, Md, Kd, Md, dwork, lwork, dinfo) != CUSOLVER_STATUS_SUCCESS) return false;
+	cusolverStatus_t cs = cusolverDnDpotrf(h, CUBLAS_FILL_MODE_LOWER, Md, Kd, Md, dwork, lwork, dinfo);
 	int info = 0;
 	FS_CUDA(cudaMemcpy(&info, dinfo, sizeof(int), cudaMemcpyDeviceToHost));
-	return info == 0;
+	if (debug && (cs != CUSOLVER_STATUS_SUCCESS || info != 0))
+		std::fprintf(stderr, "multigrid: potrf status %d, info %d, M = %d\n", int(cs), info, Md);
+	return cs == CUSOLVER_STATUS_SUCCESS && info == 0;
 }
 
 void Multigrid::dense_solve(const float* f, float* x) {
 	Level& v = lv[L];
 	vcopy(f, v.r, 3 * v.N);
 	vproject_mean(v.r, v.N);
-	k_f2d<<<nblocks(Md, 256), 256>>>(v.r, drhs, Md);
+	k_f2d<<<nblocks(Md, 256), 256>>>(v.r, drhs, dsc, Md);  // D^{-1/2} f
 	FS_KERNEL_CHECK();
 	auto h = static_cast<cusolverDnHandle_t>(handle);
 	cusolverDnDpotrs(h, CUBLAS_FILL_MODE_LOWER, Md, 1, Kd, Md, drhs, Md, dinfo);
-	k_d2f<<<nblocks(Md, 256), 256>>>(drhs, x, Md);
+	k_d2f<<<nblocks(Md, 256), 256>>>(drhs, x, dsc, Md);  // x = D^{-1/2} y
 	FS_KERNEL_CHECK();
 	vproject_mean(x, v.N);
 }
@@ -451,27 +496,80 @@ bool Multigrid::update(const Cell& cell, Prec prec, float sigma, const float* Zs
 	sigma_ = sigma;
 	Zs_ = Zs;
 	prec_ = prec;
-	bool ok = cell_diag_blocks(cell, Zs, sigma, Dinv0, nullptr) == 0;
+	int bad0 = cell_diag_blocks(cell, Zs, sigma, Dinv0, nullptr);
+	bool ok = bad0 == 0;
+	if (bad0 && debug) std::fprintf(stderr, "multigrid: %d fine diagonal blocks not positive definite\n", bad0);
 	FS_CUDA(cudaMemset(ws, 0, 243 * lv[1].N * sizeof(float)));
 	cell_restrict_tangent(cell, ws);
 	if (sigma > 0.f && Zs) restrict_shift(nf, Zs, sigma, ws);
-	if (L == 1) {
-		ok = factor_dense(ws) && ok;
-	} else {
-		ok = store_level(1, ws) && ok;
-		for (int l = 1; l < L; l++) {
-			Level& c = lv[l + 1];
+	for (int l = 1; l <= L; l++) {
+		if (l > 1) {
+			Level& c = lv[l];
 			FS_CUDA(cudaMemset(ws, 0, 243 * c.N * sizeof(float)));
-			const Level& f = lv[l];
+			const Level& f = lv[l - 1];
 			if (prec_ == Prec::FP32) k_restrict_stencil<float><<<nblocks(c.N, 64), 64>>>(f.n, f.Sf, f.sqZ, ws);
 			else k_restrict_stencil<__half><<<nblocks(c.N, 64), 64>>>(f.n, f.Sh, f.sqZ, ws);
 			FS_KERNEL_CHECK();
-			if (l + 1 == L) ok = factor_dense(ws) && ok;
-			else ok = store_level(l + 1, ws) && ok;
 		}
+		bool lok = l == L ? factor_dense(ws) : store_level(l, ws);
+		if (!lok && debug) std::fprintf(stderr, "multigrid: level %d (%d^3) %s not positive definite\n", l, lv[l].n, l == L ? "dense factorization" : "diagonal");
+		ok = lok && ok;
 	}
 	built = true;
 	return ok;
+}
+
+double Multigrid::selfcheck(const Cell& cell) {
+	cell_ = &cell;
+	sigma_ = 0.f;
+	Zs_ = nullptr;
+	Level& c = lv[1];
+	size_t N0 = size_t(nf) * nf * nf;
+	FS_CUDA(cudaMemset(ws, 0, 243 * c.N * sizeof(float)));
+	cell_restrict_tangent(cell, ws);
+	std::vector<float> S(243 * c.N), col(3 * c.N);
+	FS_CUDA(cudaMemcpy(S.data(), ws, S.size() * sizeof(float), cudaMemcpyDeviceToHost));
+	int nc = c.n;
+	auto nidh = [&](int i, int j, int k) { return size_t(((i % nc) + nc) % nc) + size_t(nc) * (((j % nc) + nc) % nc + size_t(nc) * (((k % nc) + nc) % nc)); };
+	int test[5][3] = {{0, 0, 0}, {3, 0, 0}, {nc / 2, nc / 2, nc / 2}, {nc / 2, nc / 2, 0}, {1, 2, 3}};
+	double worst = 0;
+	for (int t = 0; t < 5; t++) {
+		int Bi = test[t][0] % nc, Bj = test[t][1] % nc, Bk = test[t][2] % nc;
+		size_t B = nidh(Bi, Bj, Bk);
+		for (int b = 0; b < 3; b++) {
+			vzero(c.x, 3 * c.N);
+			float one = 1.f;
+			FS_CUDA(cudaMemcpy(c.x + B * 3 + b, &one, sizeof(float), cudaMemcpyHostToDevice));
+			vzero(f0, 3 * N0);
+			k_prolong_add<<<nblocks(N0, 128), 128>>>(nc, c.x, f0);
+			FS_KERNEL_CHECK();
+			cell_product(cell, f0, nullptr, r0, nullptr);
+			k_restrict_vec<<<nblocks(c.N, 128), 128>>>(nf, r0, c.f);
+			FS_KERNEL_CHECK();
+			FS_CUDA(cudaMemcpy(col.data(), c.f, col.size() * sizeof(float), cudaMemcpyDeviceToHost));
+			double dmax = 0, vmax = 0, far = 0;
+			std::vector<char> near(c.N, 0);
+			for (int oi = 0; oi < 27; oi++) {
+				// A = B - offset(oi): B is the neighbour of A at offset oi
+				int dx = oi % 3 - 1, dy = (oi / 3) % 3 - 1, dz = oi / 9 - 1;
+				size_t A = nidh(Bi - dx, Bj - dy, Bk - dz);
+				near[A] = 1;
+				for (int a = 0; a < 3; a++) {
+					double sv = S[size_t(oi * 9 + a * 3 + b) * c.N + A], cv = col[A * 3 + a];
+					dmax = std::max(dmax, std::fabs(sv - cv));
+					vmax = std::max(vmax, std::fabs(cv));
+				}
+			}
+			for (size_t A = 0; A < c.N; A++)
+				if (!near[A])
+					for (int a = 0; a < 3; a++) far = std::max(far, double(std::fabs(col[A * 3 + a])));
+			double rel = dmax / std::max(vmax, 1e-300);
+			worst = std::max(worst, rel);
+			std::printf("  coarse node (%d %d %d) comp %d: |column| %.3e, stencil error %.3e (rel %.2e), outside 27-point %.2e\n", Bi, Bj, Bk, b,
+				vmax, dmax, rel, far);
+		}
+	}
+	return worst;
 }
 
 void Multigrid::smooth(int l, const float* f, float* x, bool forward) {

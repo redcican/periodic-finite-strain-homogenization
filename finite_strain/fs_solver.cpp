@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace fs {
@@ -171,7 +172,10 @@ bool Solver::buildPreconditioner(Prec p, float sigma) {
 			for (int b = 0; b < a; b++) D[a * nF + b] = D[b * nF + a] = 0.5 * (D[a * nF + b] + D[b * nF + a]);
 		for (int a = 0; a < nF; a++) D[a * nF + a] += sigma * Z0F[a];
 		std::memcpy(Ds, D, sizeof(double) * nF * nF);
-		if (!chol(Ds, nF)) ok = false;
+		if (!chol(Ds, nF)) {
+			ok = false;
+			if (std::getenv("FS_DEBUG")) std::fprintf(stderr, "border block not positive definite (D11 = %g)\n", D[0]);
+		}
 	}
 	precReady = ok;
 	sigmaNow = sigma;

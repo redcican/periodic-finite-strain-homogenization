@@ -32,6 +32,11 @@ public:
 	// z = V r, one symmetric V-cycle on the fine level; r and z are fine nodal vectors (3 n^3).
 	void vcycle(const float* r, float* z);
 
+	// Self-test of the Galerkin restriction: compares columns of the first coarse stencil with
+	// P^T K P e computed by prolongation, fine product and restriction. Returns the largest
+	// relative error over the tested columns.
+	double selfcheck(const Cell& cell);
+
 	int levels() const { return L + 1; }
 	Prec precision() const { return prec_; }
 	// Device memory of the coarse operators in bytes (stored stencils, factor, workspace).
@@ -72,6 +77,7 @@ private:
 	double* Kd = nullptr;
 	double* dwork = nullptr;
 	double* drhs = nullptr;
+	double* dsc = nullptr;   // D^{-1/2} of the coarsest operator (Jacobi scaling before the factorization)
 	int* dinfo = nullptr;
 	int lwork = 0;
 	void* handle = nullptr;

@@ -188,6 +188,23 @@ int run_fdcheck_mode() {
 	return 0;
 }
 
+int run_mgcheck_mode() {
+	int n = 0;
+	std::vector<float> rho = load_density(n);
+	fs::SolverOptions o = solver_options();
+	fs::Solver S(n, rho, o);
+	fs::LoadPath path = fs::make_path(FLAGS_path, FLAGS_steps, FLAGS_inc);
+	S.setFree(path.freeComps);
+	S.resetState();
+	double F[9];
+	path.F(FLAGS_steps * path.inc, F);  // the tangent at the affine state of the last load point
+	S.setPrescribed(F);
+	S.evaluateCurrent();
+	double worst = S.mg.selfcheck(S.cell);
+	std::printf("largest relative stencil error %.3e\n", worst);
+	return worst < 1e-4 ? 0 : 2;
+}
+
 int run_design_mode() {
 	int n = 0;
 	std::vector<float> x0 = load_density(n);
@@ -236,6 +253,7 @@ int main(int argc, char** argv) {
 		if (FLAGS_mode == "toec") return run_toec_mode();
 		if (FLAGS_mode == "fdcheck") return run_fdcheck_mode();
 		if (FLAGS_mode == "design") return run_design_mode();
+		if (FLAGS_mode == "mgcheck") return run_mgcheck_mode();
 		std::fprintf(stderr, "unknown mode %s\n", FLAGS_mode.c_str());
 		return 1;
 	} catch (const std::exception& e) {
