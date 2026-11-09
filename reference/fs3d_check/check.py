@@ -9,6 +9,12 @@ Items (--items):
      g(t) = <Pbar(I + t H), H> (fully prescribed Fbar) by Richardson-extrapolated central differences
   5  stability: lambda_min of the scaled tangent along L2 (criterion 1) against LOBPCG on the oracle Hessian with
      the same scaling; the first load point with lambda_min <= 0 must agree within one step
+  7  branch switching: fs3d -branch along L2 against the oracle path warm-started with a random kick of
+     1e-3 max|w| after every step (the kick lets the oracle drop onto the buckled branch): Pbar_11, nu_12, energy and
+     lambda_min at every load point; with --nlfiber <dir> also against nlfiber.qoi.run_path (kick 1e-3) on the same
+     solid (mech.Cell with emin 1e-9 on the physical density; --nlfiber_emin 1e-3 instead takes nlfiber's default solid
+     s = 1e-3 + 0.999 rho^3 and gives fs3d r = s^(1/3) as nlfiber/backend_fs3d.py does, which matches the void
+     interpolation gamma(rho^3) only in black-and-white cells)
 
 Both solvers use E = 10, nu = 0.3, the neo-Hookean energy with the void interpolation (beta 500, rho0 0.01) and the
 stiffness scale 1e-9 + rho^3 of the physical density rho in the .npy cell (shape (n, n, n), axis order x, y, z).
@@ -17,6 +23,7 @@ Usage (homo3d-jax env, GPU 1):
   CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python -I reference/fs3d_check/check.py \\
       --cells runs/cells/rod16.npy runs/cells/bulk32.npy --out runs/check --items 1 2 3 4 [--prec adaptive]
   Item 5 only makes sense for a cell that becomes unstable in compression: --items 5 --emin5 -0.14 --de5 0.01.
+  Item 7 likewise: --items 7 --emin7 -0.2 --de7 0.01 [--nlfiber /path/to/nonlinear-fiber-homogenization].
 Oracle results are cached in <out>/<cell>/oracle_*.{npy,csv,json}; delete them to recompute. A summary table is
 printed and appended to <out>/summary.csv.
 """
@@ -198,6 +205,79 @@ class Oracle:
         f.write_text(json.dumps(data, indent=1))
         return val
 
+    def lam_min_fn(self):
+        """lambda_min(z, Fb) of D^-1/2 H D^-1/2 (D: Jacobi diagonal at the undeformed state, translations excluded) by
+        LOBPCG, warm-started from the previous call, as reference/jax/stability_path.py."""
+        if hasattr(self, "_lam_min"):
+            return self._lam_min
+        import jax
+        import jax.numpy as jnp
+        from scipy.sparse.linalg import LinearOperator, lobpcg
+
+        mix = self.mix
+        nz = mix.nw + 2
+        hvp_block = jax.jit(lambda z, Fb, V: jax.lax.map(lambda v: mix._hvp_raw(z, Fb, v), V.T, batch_size=4).T)
+        z0 = jnp.concatenate([jnp.zeros(mix.nw), jnp.ones(2)])
+        Dm12 = jnp.sqrt(mix._minv(z0, jnp.eye(3)))
+        T = np.zeros((nz, 3))
+        for i in range(3):
+            T[i:mix.nw:3, i] = 1.0
+        Y, _ = np.linalg.qr(T / np.asarray(Dm12)[:, None])
+        X = [np.random.default_rng(0).standard_normal((nz, 4))]
+
+        def lam_min(z, Fb):
+            zj, Fj = jnp.asarray(z), jnp.asarray(Fb)
+
+            def mm(v):
+                V = jnp.asarray(np.asarray(v, dtype=np.float64).reshape(nz, -1)) * Dm12[:, None]
+                return np.asarray(hvp_block(zj, Fj, V) * Dm12[:, None]).reshape(v.shape)
+
+            op = LinearOperator((nz, nz), matvec=mm, matmat=mm, dtype=np.float64)
+            vals, vecs = lobpcg(op, X[0], Y=Y, largest=False, tol=1e-5, maxiter=2000)
+            X[0] = vecs
+            return float(np.min(vals))
+
+        self._lam_min = lam_min
+        return lam_min
+
+    def path_kicked(self, name, eps, kick=1e-3, seed=0):
+        """Uniaxial stress along x at the strains eps (in path order), each step warm-started from the previous state
+        plus a random kick of kick max|w| on the fluctuation (nlfiber.qoi.run_path rule, seed 0), so the path can leave
+        a branch that has become unstable; cached CSV with eps, P11, F22, F33, energy, lam1, newton, cg, seconds."""
+        f = self.cache / f"oracle_{name}_kick{kick:g}.csv"
+        if f.exists():
+            with open(f, newline="") as fh:
+                rows = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(fh)]
+            if [round(r["eps"], 10) for r in rows] == [round(e, 10) for e in eps]:
+                return {k: np.array([r[k] for r in rows]) for k in rows[0]}
+        import jax.numpy as jnp
+
+        mix, lam_min = self.mix, self.lam_min_fn()
+        rng = np.random.default_rng(seed)
+        rows, z = [], None
+        for e in eps:
+            Fb = np.diag([1 + e, 1.0, 1.0])
+            if z is not None:
+                Fb[1, 1], Fb[2, 2] = float(z[mix.nw]), float(z[mix.nw + 1])
+            t = time.time()
+            w, F, log = mix.solve(Fb, z0=z, rtol=1e-10)
+            z = log["z"]
+            F = np.asarray(F)
+            P = np.asarray(self.cell.mean_stress(w, F))
+            Pi = float(mix._E(z, jnp.asarray(F)))
+            lam = lam_min(z, F)
+            rows.append(dict(eps=e, P11=P[0, 0], F22=F[1, 1], F33=F[2, 2], energy=Pi, lam1=lam, newton=log["newton"], cg=log["cg"],
+                             seconds=time.time() - t, converged=float(log["converged"])))
+            print(f"    oracle {name} kicked eps {e:+.4f}: P11 {P[0, 0]:+.6e} nu {-(F[1, 1] - 1) / e:+.5f} Pi {Pi:.8e} lambda {lam:+.3e} "
+                  f"newton {log['newton']} {time.time() - t:.1f}s{'' if log['converged'] else '  NOT CONVERGED'}", flush=True)
+            wmax = float(jnp.abs(z[: mix.nw]).max()) + 1e-12
+            z = z.at[: mix.nw].add(jnp.asarray(rng.standard_normal(mix.nw)) * kick * wmax)
+        with open(f, "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(rows)
+        return {k: np.array([r[k] for r in rows]) for k in rows[0]}
+
     def stability(self, eps):
         """lambda_min of D^-1/2 H D^-1/2 (D: Jacobi diagonal at the undeformed state, translations excluded)
         along the uniaxial-stress path at the strains eps, as reference/jax/stability_path.py."""
@@ -209,34 +289,8 @@ class Oracle:
         have = {round(r["eps"], 10) for r in rows}
         todo = [e for e in [0.0] + list(eps) if round(e, 10) not in have]
         if todo:
-            import jax
-            import jax.numpy as jnp
-            from scipy.sparse.linalg import LinearOperator, lobpcg
-
-            mix = self.mix
-            nz = mix.nw + 2
-            hvp_block = jax.jit(lambda z, Fb, V: jax.lax.map(lambda v: mix._hvp_raw(z, Fb, v), V.T, batch_size=4).T)
-            z0 = jnp.concatenate([jnp.zeros(mix.nw), jnp.ones(2)])
-            Dm12 = jnp.sqrt(mix._minv(z0, jnp.eye(3)))
-            T = np.zeros((nz, 3))
-            for i in range(3):
-                T[i:mix.nw:3, i] = 1.0
-            Y, _ = np.linalg.qr(T / np.asarray(Dm12)[:, None])
-            X = np.random.default_rng(0).standard_normal((nz, 4))
-
-            def lam_min(z, Fb):
-                nonlocal X
-                zj, Fj = jnp.asarray(z), jnp.asarray(Fb)
-
-                def mm(v):
-                    V = jnp.asarray(np.asarray(v, dtype=np.float64).reshape(nz, -1)) * Dm12[:, None]
-                    return np.asarray(hvp_block(zj, Fj, V) * Dm12[:, None]).reshape(v.shape)
-
-                op = LinearOperator((nz, nz), matvec=mm, matmat=mm, dtype=np.float64)
-                vals, vecs = lobpcg(op, X, Y=Y, largest=False, tol=1e-5, maxiter=2000)
-                X = vecs
-                return float(np.min(vals))
-
+            mix, lam_min = self.mix, self.lam_min_fn()
+            z0 = np.concatenate([np.zeros(mix.nw), np.ones(2)])
             z = None
             for e in sorted(todo, key=abs):
                 t = time.time()
@@ -417,6 +471,95 @@ def item5(fsd, cell, npy, out, orc, res, emin, de):
         res.append((cell, 5, "supercell criterion: max |d lambda| / max |lambda|", f"{np.nanmax(rel):.1e}", "pass" if np.nanmax(rel) <= 0.05 else "FAIL"))
 
 
+def _compare_branch(tag, eps, p, P11o, F22o, lamo, Pio, conv, cell, res, extra=""):
+    """Table and verdict of fs3d -branch against a stable-branch path (P11, nu, lambda, energy per load point)."""
+    nu_fs = -(p["F22"] - 1) / p["eps"]
+    nu_o = -(F22o - 1) / eps
+    relP = np.abs(p["P11"] - P11o) / np.abs(P11o)
+    dnu = np.abs(nu_fs - nu_o)
+    Pi_fs = p["energy"] if "energy" in p else np.full(len(eps), np.nan)
+    relPi = np.abs(Pi_fs - Pio) / np.abs(Pio) if Pio is not None else np.full(len(eps), np.nan)
+    sw = np.where(np.diff(np.concatenate([[0], p["branch"]])) > 0)[0]
+    fund = np.where(np.isfinite(lamo) & (lamo <= 0))[0]  # the other code still on the (unstable) fundamental branch
+    for i in range(len(eps)):
+        line = (f"      eps {eps[i]:+.3f}  P11 {p['P11'][i]:+.6e} / {P11o[i]:+.6e} ({relP[i]:.1e})  nu {nu_fs[i]:+.5f} / {nu_o[i]:+.5f} "
+                f"({dnu[i]:.1e})  lambda {p['lambda_cell'][i]:+.3e} / {lamo[i]:+.3e}  branch {int(p['branch'][i])}")
+        if Pio is not None:
+            line += f"  Pi {Pi_fs[i]:.8e} / {Pio[i]:.8e} ({relPi[i]:.1e})"
+        if not conv[i]:
+            line += "  NOT CONVERGED"
+        print(line)
+    both = conv & ~np.isin(np.arange(len(eps)), fund)
+    worstP = relP[both].max() if both.any() else np.nan
+    worstNu = dnu[both].max() if both.any() else np.nan
+    worstPi = np.nanmax(relPi[both]) if both.any() and Pio is not None else np.nan
+    print(f"  [7] {tag}: fs3d switches at eps {', '.join(f'{eps[i]:+.3f}' for i in sw) or 'none'}; {extra}"
+          f"{len(fund)} load points of the other code with lambda <= 0 excluded; max rel |dP11| {worstP:.2e}, max |dnu| {worstNu:.2e}"
+          + (f", max rel |dPi| {worstPi:.2e}" if Pio is not None else "") + f"; at eps {eps[-1]:+.3f}: P11 {p['P11'][-1]:+.6e} / {P11o[-1]:+.6e}, "
+          f"nu {nu_fs[-1]:+.5f} / {nu_o[-1]:+.5f}")
+    ok = np.isfinite(worstP) and worstP <= 1e-3 and worstNu <= 1e-3
+    res.append((cell, 7, f"{tag}: max rel |dP11| / max |dnu| on the stable branch to eps={eps[-1]:+.2f}", f"{worstP:.1e} / {worstNu:.1e}",
+                "pass" if ok else "FAIL"))
+    return ok
+
+
+def item7(fsd, cell, npy, out, orc, res, emin, de, nlfiber_dir, nl_emin):
+    nsteps = int(round(abs(emin) / de))
+    eps = -de * np.arange(1, nsteps + 1)
+    o = out / "branch_L2"
+    o.mkdir(exist_ok=True)
+    txt, dt, rc = fsd.run(["-mode", "path", "-in", npy, "-prefix", f"{o}/", "-path", "L2", "-steps", nsteps, "-inc", de, "-prec",
+                           fsd.prec, "-crit", "1", "-nostop_distortion", "-branch"], o / "log.txt")
+    p = read_path_csv(o / "path_L2.csv")
+    if len(p["eps"]) != nsteps or "branch" not in p:
+        res.append((cell, 7, "fs3d -branch path L2", f"{len(p['eps'])}/{nsteps} points", "FAIL"))
+        return
+    for line in txt.splitlines():
+        if "branch switch" in line:
+            print("      fs3d:" + line.strip())
+    orow = orc.path_kicked("L2", list(eps))
+    _compare_branch("vs oracle (kick 1e-3)", eps, p, orow["P11"], orow["F22"], orow["lam1"], orow["energy"], orow["converged"] > 0, cell, res,
+                    extra=f"{np.nansum(p['seconds']):.2f}s fs3d vs {orow['seconds'].sum():.0f}s oracle; ")
+    res.append((cell, 7, "fs3d -branch: Newton per step (mean/max), seconds per path", f"{p['newton'].mean():.1f}/{int(p['newton'].max())}, {np.nansum(p['seconds']):.2f}s", ""))
+    if not nlfiber_dir:
+        return
+    # nlfiber: s = emin + (1 - emin) rho^3 and gamma(rho^3); emin 1e-9 is the solid of fs3d and the oracle, emin 1e-3
+    # (nlfiber's default) is compared through r = s^(1/3) given to fs3d, as nlfiber/backend_fs3d.py
+    sys.path.insert(0, str(Path(nlfiber_dir).resolve()))
+    from nlfiber import mech, qoi  # noqa: E402
+
+    f = orc.cache / f"oracle_nlfiber_L2_emin{nl_emin:g}_{nsteps}x{de:g}.csv"
+    if f.exists():
+        with open(f, newline="") as fh:
+            nrows = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(fh)]
+    else:
+        ncell = mech.Cell(orc.rho, E=E, nu=NU, emin=nl_emin)
+        t = time.time()
+        rows = qoi.run_path(ncell, "compression", emax=abs(emin), de=de, kick=1e-3, stability=True, contact_check=False, verbose=True)
+        nrows = [dict(eps=r["e"], P11=r["P"][0, 0], F22=r["F"][1, 1], F33=r["F"][2, 2], lam1=float(np.min(r["lam"])) if "lam" in r else np.nan,
+                      newton=r["newton"], seconds=r["seconds"], converged=float(r["converged"])) for r in rows]
+        print(f"    nlfiber path: {len(nrows)} points, {time.time() - t:.0f}s")
+        with open(f, "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(nrows[0].keys()))
+            wr.writeheader()
+            wr.writerows(nrows)
+    m = min(len(nrows), nsteps)
+    nr = {k: np.array([r[k] for r in nrows[:m]]) for k in nrows[0]}
+    if nl_emin == 1e-9:
+        p2, tag = p, "vs nlfiber (kick 1e-3, emin 1e-9)"
+    else:
+        r_npy = o / "cell_r.npy"
+        np.save(r_npy, np.cbrt(nl_emin + (1 - nl_emin) * np.clip(orc.rho, 0, 1) ** 3))
+        o2 = out / "branch_L2_nlfiber"
+        o2.mkdir(exist_ok=True)
+        txt, dt, rc = fsd.run(["-mode", "path", "-in", r_npy, "-prefix", f"{o2}/", "-path", "L2", "-steps", nsteps, "-inc", de, "-prec",
+                               fsd.prec, "-crit", "1", "-nostop_distortion", "-branch"], o2 / "log.txt")
+        p2, tag = read_path_csv(o2 / "path_L2.csv"), f"vs nlfiber (kick 1e-3, s = {nl_emin:g} + {1 - nl_emin:g} rho^3, fs3d on r = s^(1/3))"
+    p2 = {k: v[:m] for k, v in p2.items()}
+    _compare_branch(tag, eps[:m], p2, nr["P11"], nr["F22"], nr["lam1"], None, nr["converged"] > 0, cell, res,
+                    extra=f"{np.nansum(p2['seconds']):.2f}s fs3d vs {nr['seconds'].sum():.0f}s nlfiber; ")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cells", nargs="+", required=True, help="density .npy files (physical density, shape (n, n, n))")
@@ -432,6 +575,10 @@ def main():
     ap.add_argument("--delta", type=float, default=0.01, help="item 4: oracle finite-difference step")
     ap.add_argument("--emin5", type=float, default=-0.14)
     ap.add_argument("--de5", type=float, default=0.01)
+    ap.add_argument("--emin7", type=float, default=-0.2, help="item 7: largest compressive strain")
+    ap.add_argument("--de7", type=float, default=0.01)
+    ap.add_argument("--nlfiber", default="", help="item 7: nonlinear-fiber-homogenization checkout (adds the nlfiber comparison)")
+    ap.add_argument("--nlfiber_emin", type=float, default=1e-9, help="item 7: nlfiber stiffness floor (1e-9: the solid of fs3d; 1e-3: nlfiber's default, through r = s^(1/3))")
     ap.add_argument("-v", "--verbose", action="store_true", help="print the fs3d command lines")
     a = ap.parse_args()
     out = Path(a.out)
@@ -457,6 +604,8 @@ def main():
             item4(cell, CT, orc, res, a.delta)
         if 5 in a.items:
             item5(fsd, cell, npy, o, orc, res, a.emin5, a.de5)
+        if 7 in a.items:
+            item7(fsd, cell, npy, o, orc, res, a.emin7, a.de7, a.nlfiber, a.nlfiber_emin)
     print("\nsummary")
     with open(out / "summary.csv", "a", newline="") as fh:
         wr = csv.writer(fh)

@@ -13,6 +13,7 @@ order x, y, z; n = 16, 32, 64, ...).
 | 3 | `-mode fdcheck -obj P11 -fd_out` | `Mixed.grad_rho` | dPbar_11/drho at eps = 0.1: fs3d adjoint against fs3d central differences and against the reference adjoint (relative L2) |
 | 4 | `moduli.txt` (C^H and T) | `Cell` at Fbar = I + tH | W''' = T[h,h,h] + 3 C[h, H^T H] along four strain directions against the second derivative of <Pbar(I + tH), H> |
 | 5 | `-mode path -path L2 -crit 1` | LOBPCG on D^-1/2 H D^-1/2 | lambda_min(eps)/lambda_min(0) and the first load point with lambda_min <= 0 |
+| 7 | `-mode path -path L2 -crit 1 -branch` | `Mixed` warm-started with a random kick of 1e-3 max\|w\| after every step (and `nlfiber.qoi.run_path` with `--nlfiber`) | Pbar_11(eps) relative, nu_12(eps) absolute (target 1e-3) on the stable branch, energy and lambda_min per load point, the load point of the switch |
 
 ```shell
 conda activate homo3d-jax   # JAX FP64
@@ -22,11 +23,13 @@ CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python -I reference/f
     --cells runs/cells/rod16.npy runs/cells/bulk32.npy --out runs/check --items 1 2 3 4
 CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python -I reference/fs3d_check/check.py \
     --cells runs/cells/npr32.npy --out runs/check --items 1 2 5 --de 0.01 --emax 0.2 --emin5 -0.16
+CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python -I reference/fs3d_check/check.py \
+    --cells runs/cells/npr32.npy --out runs/check --items 7 --emin7 -0.2 --de7 0.01 --nlfiber ../nonlinear-fiber-homogenization
 ```
 
 Options: `--prec fp16|fp32|adaptive` (fs3d coarse stencils, default adaptive), `--emax`, `--de` (item 2 path),
 `--fd_h`, `--fd_n` (item 3 finite differences), `--delta` (item 4 reference step), `--emin5`, `--de5` (item 5),
-`-v` prints the fs3d command lines. Reference results are cached in `<out>/<cell>/oracle_*` (delete to recompute);
+`--emin7`, `--de7`, `--nlfiber <checkout>` (item 7), `-v` prints the fs3d command lines. Reference results are cached in `<out>/<cell>/oracle_*` (delete to recompute);
 fs3d outputs go to `<out>/<cell>/<mode>/`. The summary table is printed and appended to `<out>/summary.csv`; the exit
 code is 1 if any item fails.
 
