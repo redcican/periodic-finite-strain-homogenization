@@ -91,6 +91,7 @@ float* dalloc(size_t m);
 double* dalloc_d(size_t m);
 void dfree(void* p);
 double vdot(const float* a, const float* b, size_t m);
+double vamax(const float* a, size_t m);                                   // max |a_i|
 void vaxpy(double a, const float* x, float* y, size_t m);                 // y += a x
 void vaxpby(double a, const float* x, double b, float* y, size_t m);      // y = a x + b y
 void vcopy(const float* x, float* y, size_t m);

@@ -2,6 +2,8 @@
 #include "fs_device.h"
 #include "fs_reduce.cuh"
 
+#include <algorithm>
+
 namespace fs {
 
 namespace {
@@ -17,6 +19,19 @@ __global__ void k_dot(const float* a, const float* b, size_t m, double* out) {
 	for (size_t i = blockIdx.x * size_t(blockDim.x) + threadIdx.x; i < m; i += size_t(gridDim.x) * blockDim.x)
 		v[0] += double(a[i]) * double(b[i]);
 	block_sum_atomic<1>(v, out);
+}
+
+__global__ void k_amax(const float* a, size_t m, float* out) {
+	__shared__ float sh[256];
+	float v = 0.f;
+	for (size_t i = blockIdx.x * size_t(blockDim.x) + threadIdx.x; i < m; i += size_t(gridDim.x) * blockDim.x) v = fmaxf(v, fabsf(a[i]));
+	sh[threadIdx.x] = v;
+	__syncthreads();
+	for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+		if (threadIdx.x < s) sh[threadIdx.x] = fmaxf(sh[threadIdx.x], sh[threadIdx.x + s]);
+		__syncthreads();
+	}
+	if (threadIdx.x == 0) out[blockIdx.x] = sh[0];
 }
 
 __global__ void k_axpby(float a, const float* x, float b, float* y, size_t m) {
@@ -159,6 +174,21 @@ double vdot(const float* a, const float* b, size_t m) {
 	double h;
 	FS_CUDA(cudaMemcpy(&h, d, sizeof(double), cudaMemcpyDeviceToHost));
 	return h;
+}
+
+double vamax(const float* a, size_t m) {
+	static float* d = nullptr;
+	if (!d) FS_CUDA(cudaMalloc(&d, 1024 * sizeof(float)));
+	int nb = nblocks(m, 256);
+	if (nb > 1024) nb = 1024;
+	if (nb < 1) nb = 1;
+	k_amax<<<nb, 256>>>(a, m, d);
+	FS_KERNEL_CHECK();
+	float h[1024];
+	FS_CUDA(cudaMemcpy(h, d, nb * sizeof(float), cudaMemcpyDeviceToHost));
+	float r = 0.f;
+	for (int i = 0; i < nb; i++) r = std::max(r, h[i]);
+	return r;
 }
 
 void vaxpy(double a, const float* x, float* y, size_t m) {

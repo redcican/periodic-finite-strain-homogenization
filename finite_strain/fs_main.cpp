@@ -25,6 +25,8 @@ DEFINE_double(inc, 0.0, "increment per load step (default 0.02 for L1-L3, 0.01 f
 DEFINE_string(prec, "adaptive", "coarse stencil precision: fp16, fp32 or adaptive");
 DEFINE_string(crit, "1", "stability criteria to evaluate: any of 1 (cell), 2 (2x2x2 supercell), 3 (rank-one); empty for none");
 DEFINE_int32(crit_every, 1, "evaluate criterion 1 every k-th load point");
+DEFINE_bool(branch, false, "path: at a load point with lambda_cell <= 0 switch to the stable branch (kick along the critical mode, re-converge); adds the columns branch and energy");
+DEFINE_double(branch_kick, 1e-2, "branch: first kick as a fraction of max(max|w|, voxel size), ten times larger per retry (3 retries)");
 DEFINE_double(newton_tol, 1e-6, "relative Newton tolerance");
 DEFINE_int32(krylov_max, 4000, "maximal Krylov iterations per linear solve");
 DEFINE_bool(stop_distortion, true, "stop the path once more than 1% of the void voxels reach J < 0.1");
@@ -80,6 +82,9 @@ int run_path_mode() {
 	po.crit2 = FLAGS_crit.find('2') != std::string::npos;
 	po.crit3 = FLAGS_crit.find('3') != std::string::npos;
 	po.stopOnDistortion = FLAGS_stop_distortion;
+	po.branch = FLAGS_branch;
+	po.branchFrac = FLAGS_branch_kick;
+	if (po.branch && po.crit1Every <= 0) throw std::runtime_error("-branch requires criterion 1 (-crit 1)");
 	fs::Stability stab(S);
 	std::printf("path %s on %d^3 voxels, %d steps, %s stencils\n", path.name.c_str(), n, path.nsteps, FLAGS_prec.c_str());
 	fs::PathResult r = fs::run_path(S, path, po, &stab);

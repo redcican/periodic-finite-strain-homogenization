@@ -327,6 +327,98 @@ bool Solver::effectiveTangent(double Abar[81], double tol, int* iters) {
 	return ok;
 }
 
+StepStats Solver::switchBranch(Prec p, double frac, double& alpha, bool& moved) {
+	StepStats st;
+	moved = false;
+	alpha = 0;
+	if (!eig.init || eig.X.empty() || !valid) return st;
+	const size_t m3 = 3 * cell.ne;
+	BVec v = sp.alloc(), u0 = sp.alloc(), mask = sp.alloc();
+	// nodes of the solid: diag K_T at F = I above 1 % of its largest value (the void interpolation calls a voxel
+	// void below rho^p = 0.01); amplitudes are measured there, the near-void nodes carry large fluctuations
+	{
+		std::vector<float> z(m3), mk(m3);
+		f2host(Z0w, z.data(), m3);
+		float zmax = 0.f;
+		for (size_t i = 0; i < m3; i++) zmax = std::max(zmax, z[i]);
+		for (size_t i = 0; i < m3; i++) mk[i] = z[i] > 0.01f * zmax ? 1.f : 0.f;
+		host2f(mk.data(), mask.w, m3);
+	}
+	auto solidMax = [&](const BVec& x) {
+		vmul(mask.w, x.w, trial.w, m3);
+		return vamax(trial.w, m3);
+	};
+	// critical eigenvector of the scaled tangent back in physical coordinates, max|v_w| = 1 on the solid
+	vmul(isqZ0w, eig.X[0].w, v.w, m3);
+	for (int k = 0; k < sp.nF; k++) v.f[k] = eig.X[0].f[k] / std::sqrt(Z0F[k]);
+	double vmax = solidMax(v);
+	if (vmax > 0) {
+		sp.scale(1.0 / vmax, v);
+		sp.copy(u, u0);
+		const double Pi0 = en.energy, dPi = 64.0 * kU32 * en.absEnergy;  // rounding level of Pi_h
+		const double a0 = frac * std::max(solidMax(u), 1.0 / n);
+		double bestPi = Pi0, bestA = 0;
+		bool admissible = false;
+		double aFirst = 0;
+		for (int sign : {1, -1}) {
+			double prev = Pi0, a = sign * a0;
+			for (int j = 0; j < 36; j++) {
+				sp.copy(u0, trial);
+				sp.axpy(a, v, trial);
+				double Pt[9];
+				EnergyOut et;
+				if (!evaluate(trial, gt, Pt, et)) {
+					if (j < 12 && !admissible) {
+						a *= 0.5;  // J_gamma <= 0 somewhere: a smaller first kick
+						continue;
+					}
+					break;
+				}
+				if (!admissible) {
+					admissible = true;
+					aFirst = a;
+				}
+				if (et.energy < bestPi) {
+					bestPi = et.energy;
+					bestA = a;
+				}
+				if (et.energy > prev + dPi) break;  // the energy rises again along v
+				prev = et.energy;
+				a *= 2;
+			}
+		}
+		if (bestA == 0 && admissible) bestA = aFirst;  // no decrease resolved: the first kick
+		if (bestA != 0) {
+			alpha = std::fabs(bestA);
+			sp.copy(u0, u);
+			sp.axpy(bestA, v, u);
+			if (opt.verbose >= 2) std::printf("    kick %+.3e along the critical mode: Pi %.10e -> %.10e\n", bestA, Pi0, bestPi);
+			int nmax = opt.newtonMax;
+			opt.newtonMax = 3 * nmax;  // leaving a saddle takes more iterations than a load step
+			descent = true;            // regularized Newton: the energy decreases monotonically
+			st = newtonSolve(p);
+			descent = false;
+			opt.newtonMax = nmax;
+			if (st.fail != StepFail::None) {
+				sp.copy(u0, u);
+				evaluateCurrent();
+			} else {
+				moved = en.energy < Pi0 - dPi;  // a lower-energy equilibrium at the same load: the saddle was left
+				if (!moved) {
+					sp.copy(u0, u);  // back to the fundamental state
+					evaluateCurrent();
+				}
+			}
+		} else {
+			st.fail = StepFail::InvalidJ;
+		}
+	}
+	sp.release(v);
+	sp.release(u0);
+	sp.release(mask);
+	return st;
+}
+
 double Stability::supercell(double tol, int maxit, Prec p) {
 	int n = S.n, n2 = 2 * n;
 	if (!sc) {

@@ -16,6 +16,8 @@
 
 namespace fs {
 
+constexpr double kU32 = 5.9604644775390625e-08;  // 2^-24, unit roundoff of FP32
+
 struct SolverOptions {
 	double E = 10, nu = 0.3;              // base material
 	double beta = 500, rho0 = 0.01;       // energy interpolation
@@ -85,6 +87,12 @@ public:
 	double lambdaMin(EigState& st, double tol, int maxit, bool usePrec, int* iters = nullptr, bool* conv = nullptr);
 	// Effective tangent Abar = D9 - B9^T K^{-1} B9 (nine K_T solves, warm-started); requires buildPreconditioner.
 	bool effectiveTangent(double Abar[81], double tol, int* iters = nullptr);
+	// Branch switching at a loss of stability: perturbs the state along the critical eigenvector v of the last
+	// lambdaMin call (max|v_w| = 1), u <- u + alpha v with alpha = frac max(max|w|, 1/n) doubled while the energy
+	// along +-v decreases (the lowest energy fixes the sign and alpha), and re-converges the Newton iteration
+	// at the same load (three times the Newton iterations of a load step). moved: the re-converged state has a
+	// lower energy than the start beyond the rounding level (the saddle was left); otherwise the start is restored.
+	StepStats switchBranch(Prec p, double frac, double& alpha, bool& moved);
 
 	// ---- small-strain moduli at Fbar = I (fs_sens.cpp); the state is reset
 	bool linearModuli(double C[36], double T56[56], bool toec, double tol, Prec p);
@@ -118,6 +126,11 @@ public:
 private:
 	bool lineSearch(const BVec& du, double eta);
 	bool prepareShifted(Prec p, float& sigma, bool first);
+	// Regularized Newton step of a branch switch: PCG on H + sigma Z0 with sigma = 2 max(0, -lambda_ritz), a descent
+	// direction that doubles the amplitude along an unstable mode per iteration and is the Newton step once the
+	// tangent is positive definite.
+	bool regularizedSolve(Prec p, float& sigma, double eta, KResult& kr, int& krylov);
+	bool descent = false;          // newtonSolve takes regularized steps instead of MINRES (switchBranch)
 
 	BVec trial, gt, du, rhs, tmp1, tmp2;
 	double Ds[81];                 // Cholesky factor of the border block D + sigma Z0F
@@ -165,6 +178,8 @@ struct PointRecord {
 	double ell = std::numeric_limits<double>::quiet_NaN();    // criterion 3, min_n lambda_min(Q(n))
 	double voidDistortedFrac = 0;
 	double seconds = 0;  // wall time of the load step (Newton iterations, criteria and hook)
+	int branch = 0;      // branch switches so far (-branch)
+	double energy = std::numeric_limits<double>::quiet_NaN();  // Pi_h at the load point
 };
 
 struct PathOptions {
@@ -174,6 +189,9 @@ struct PathOptions {
 	double eigTol = 1e-3;
 	int eigMaxit = 200;
 	bool stopOnDistortion = true;
+	bool branch = false;                // switch to the stable branch at lambda_cell <= 0 (requires crit1Every > 0)
+	double branchFrac = 1e-2;           // first kick, fraction of max(max|w|, voxel size); x10 per retry
+	int branchTries = 3;                // failed kicks in a row per load point (at most 2 branchTries switches)
 	std::function<void(int k, Solver& s, PointRecord& rec)> onLoadPoint;  // adjoints etc.
 };
 
@@ -183,6 +201,7 @@ struct PathResult {
 	double lam0 = std::numeric_limits<double>::quiet_NaN();
 	std::vector<PointRecord> pts;
 	int newton = 0, krylov = 0;
+	bool branch = false;  // the CSV carries the branch and energy columns
 };
 
 class Stability;  // supercell and rank-one criteria (fs_stability.h)

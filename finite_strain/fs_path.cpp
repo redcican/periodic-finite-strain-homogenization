@@ -31,6 +31,8 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 		if (s.opt.verbose) std::printf("  lambda_min(0) = %.6e\n", res.lam0);
 	}
 
+	res.branch = po.branch;
+	int nSwitch = 0;
 	BVec backup = s.sp.alloc();
 	double t = 0;
 	for (int k = 1; k <= path.nsteps; k++) {
@@ -105,6 +107,57 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 				}
 			}
 		}
+		if (po.branch && c1 && rec.lam1 <= 0) {
+			// loss of stability: leave the fundamental branch along the critical mode and re-converge
+			// kicks ten times larger after a failed attempt, up to branchTries in a row; a switch that leaves
+			// lambda_min <= 0 (a further mode, or the flat direction of a degenerate pair) starts the kicks again
+			double frac = po.branchFrac;
+			for (int fails = 0, sw = 0; rec.lam1 <= 0 && fails < po.branchTries && sw < 2 * po.branchTries;) {
+				double alpha = 0, Pi0 = s.en.energy, lamOld = rec.lam1;
+				bool moved = false;
+				StepStats st = s.switchBranch(prec, frac, alpha, moved);
+				rec.newton += st.newton;
+				rec.krylov += st.krylov;
+				rec.minres = rec.minres || st.minres;
+				res.newton += st.newton;
+				res.krylov += st.krylov;
+				if (st.fail != StepFail::None) {
+					if (s.opt.verbose) std::printf("  branch switch at k = %d failed (%s, kick %.3e)\n", k, step_fail_name(st.fail), alpha);
+					if (prec == Prec::FP16 && canSwitch) {
+						prec = Prec::FP32;
+						continue;
+					}
+					fails++;
+					frac *= 10;
+				} else if (!moved) {
+					if (s.opt.verbose) std::printf("  branch switch at k = %d: kick %.3e returned to the fundamental branch\n", k, alpha);
+					fails++;
+					frac *= 10;
+				} else {
+					nSwitch++;
+					sw++;
+					fails = 0;
+					frac = po.branchFrac;
+					buildAtState();
+					rec.lam1 = s.lambdaMin(s.eig, po.eigTol, po.eigMaxit, true);
+					lamHist.back() = rec.lam1;
+					if (s.opt.verbose)
+						std::printf("  branch switch %d at k = %d: kick %.3e, Pi %.10e -> %.10e, lambda_min %+.3e -> %+.3e, newton %d\n", nSwitch, k,
+							alpha, Pi0, s.en.energy, lamOld, rec.lam1, st.newton);
+				}
+			}
+			s.fullF(s.u, rec.F);
+			for (int c = 0; c < 9; c++) rec.P[c] = s.Pbar[c];
+			rec.eps = path.strain(rec.F);
+			if ((path.name == "L1" || path.name == "L2") && rec.eps != 0) {
+				rec.nu12 = -(rec.F[4] - 1) / rec.eps;
+				rec.nu13 = -(rec.F[8] - 1) / rec.eps;
+			}
+			rec.prec = prec;
+			rec.voidDistortedFrac = s.cell.nvoid > 0 ? double(s.en.voidDistorted) / double(s.cell.nvoid) : 0.0;
+		}
+		rec.branch = nSwitch;
+		rec.energy = s.en.energy;
 		if (po.crit2 && stab) rec.lam2 = stab->supercell(po.eigTol, po.eigMaxit, prec);
 		if (po.crit3 && stab) rec.ell = stab->rankOne();
 		if (po.onLoadPoint) po.onLoadPoint(k, s, rec);
@@ -127,14 +180,18 @@ PathResult run_path(Solver& s, const LoadPath& path, PathOptions& po, Stability*
 void write_path_csv(const std::string& file, const PathResult& r) {
 	std::ofstream o(file);
 	o << "k,t,eps,F11,F22,F33,F12,P11,P12,P13,P21,P22,P23,P31,P32,P33,nu12,nu13,newton,krylov,substeps,failures,minres,"
-		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted,seconds\n";
+		 "prec,lambda_cell,lambda_supercell,ellipticity,void_distorted,seconds";
+	if (r.branch) o << ",branch,energy";
+	o << "\n";
 	o.precision(10);
 	for (const auto& p : r.pts) {
 		o << p.k << "," << p.t << "," << p.eps << "," << p.F[0] << "," << p.F[4] << "," << p.F[8] << "," << p.F[1];
 		for (int c = 0; c < 9; c++) o << "," << p.P[c];
 		o << "," << p.nu12 << "," << p.nu13 << "," << p.newton << "," << p.krylov << "," << p.substeps << "," << p.failures << ","
 		  << (p.minres ? 1 : 0) << "," << prec_name(p.prec) << "," << p.lam1 << "," << p.lam2 << "," << p.ell << ","
-		  << p.voidDistortedFrac << "," << p.seconds << "\n";
+		  << p.voidDistortedFrac << "," << p.seconds;
+		if (r.branch) o << "," << p.branch << "," << p.energy;
+		o << "\n";
 	}
 }
 

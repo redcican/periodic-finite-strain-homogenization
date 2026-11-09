@@ -20,7 +20,6 @@ const char* step_fail_name(StepFail f) {
 
 namespace {
 const double kIdentity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-const double kU32 = 5.9604644775390625e-08;  // 2^-24
 
 // In-place Cholesky of an m x m row-major SPD matrix (lower factor); false if not positive definite.
 bool chol(double* A, int m) {
@@ -38,6 +37,21 @@ bool chol(double* A, int m) {
 	}
 	return true;
 }
+
+// H + sigma Z0 with the preconditioner of the solver (built for the same shift).
+struct ShiftedOp : LinOp {
+	Solver& S;
+	float sigma;
+	ShiftedOp(Solver& s, float sg) : S(s), sigma(sg) {}
+	void apply(const BVec& x, BVec& y) override {
+		S.apply(x, y);
+		if (sigma > 0.f) {
+			vaxmy(sigma, S.Z0w, x.w, y.w, 3 * S.cell.ne);
+			for (int k = 0; k < S.sp.nF; k++) y.f[k] += sigma * S.Z0F[k] * x.f[k];
+		}
+	}
+	bool prec(const BVec& r, BVec& z) override { return S.prec(r, z); }
+};
 
 void chol_solve(const double* L, int m, const double* b, double* x) {
 	double y[9];
@@ -225,6 +239,32 @@ bool Solver::prepareShifted(Prec p, float& sigma, bool first) {
 	return true;
 }
 
+bool Solver::regularizedSolve(Prec p, float& sigma, double eta, KResult& kr, int& krylov) {
+	const float sMin = float(0.01 * opt.sigmaFloor);  // smallest shift tried when zero fails
+	auto build = [&](float& sg) {  // at the current state, the shift doubled until positive definite
+		for (int tries = 0; tries < 16; tries++) {
+			if (buildPreconditioner(p, sg)) return true;
+			sg = sg > 0.f ? 2.f * sg : sMin;
+		}
+		return false;
+	};
+	if (!build(sigma)) return false;
+	double lam = lambdaMin(eig, 1e-2, 30, true);  // Ritz value, an upper bound of lambda_min
+	sigma = float(2.0 * std::max(0.0, -lam));     // step along the unstable mode: twice its amplitude
+	for (int tries = 0; tries < 12; tries++) {
+		if (!build(sigma)) return false;
+		ShiftedOp op(*this, sigma);
+		sp.zero(du);
+		kr = pcg(sp, op, rhs, du, eta, opt.krylovMax);
+		krylov += kr.iters;
+		if (kr.status == KStatus::PrecFail) return false;
+		if (kr.status != KStatus::Indefinite) break;
+		sigma = sigma > 0.f ? 2.f * sigma : sMin;  // the Ritz value overestimated lambda_min
+	}
+	if (opt.verbose >= 2) std::printf("      regularized step: lambda_ritz = %.3e, sigma = %.3e\n", lam, sigma);
+	return kr.status != KStatus::Indefinite;
+}
+
 bool Solver::lineSearch(const BVec& dir, double eta) {
 	double slope = sp.dot(g, dir);
 	double Pi0 = en.energy;
@@ -313,7 +353,16 @@ StepStats Solver::newtonSolve(Prec p) {
 		eta = std::min(eta, 0.9);
 		etaPrev = eta;
 
-		if (!mres) {
+		sp.copy(g, rhs);
+		sp.scale(-1.0, rhs);
+		sp.zero(du);
+		KResult kr;
+		if (descent) {
+			if (!regularizedSolve(p, sigma, eta, kr, st.krylov)) {
+				st.fail = StepFail::PrecNotPD;
+				break;
+			}
+		} else if (!mres) {
 			if (!buildPreconditioner(p, 0.f)) {
 				st.fail = StepFail::PrecNotPD;
 				break;
@@ -322,11 +371,8 @@ StepStats Solver::newtonSolve(Prec p) {
 			st.fail = StepFail::PrecNotPD;
 			break;
 		}
-		sp.copy(g, rhs);
-		sp.scale(-1.0, rhs);
-		sp.zero(du);
-		KResult kr;
-		if (!mres) {
+		if (descent) {
+		} else if (!mres) {
 			kr = pcg(sp, *this, rhs, du, eta, opt.krylovMax);
 			st.krylov += kr.iters;
 			if (kr.status == KStatus::Indefinite) {
@@ -349,7 +395,7 @@ StepStats Solver::newtonSolve(Prec p) {
 		}
 		if (opt.verbose >= 2)
 			std::printf("    newton %2d  |g| = %.3e  eta = %.2e  krylov = %4d (%s)  relres = %.2e\n", j, gn / g0, eta,
-				kr.iters, mres ? "minres" : "pcg", kr.relres);
+				kr.iters, descent ? "regularized" : (mres ? "minres" : "pcg"), kr.relres);
 		if (!lineSearch(du, eta)) {
 			st.fail = StepFail::LineSearch;
 			break;
